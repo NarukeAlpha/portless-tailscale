@@ -1,8 +1,27 @@
 # Changelog
 
-## 0.11.1
+## 0.12.0
 
 <!-- release:start -->
+
+### New Features
+
+- **Tailscale sharing**: New `--tailscale` flag shares any portless app over your Tailscale network with zero framework config. Each app is root-mounted on its own Tailscale HTTPS port (443, 8443, 8444, ...) so no `basePath` configuration is needed. Works as a global flag, per-app flag (`portless myapp --tailscale next dev`), or env var (`PORTLESS_TAILSCALE=1`). (#262)
+- **Tailscale Funnel**: New `--funnel` flag exposes apps to the public internet through Tailscale Funnel. Implies `--tailscale`. Also configurable via `PORTLESS_FUNNEL=1`. (#262)
+- **`PORTLESS_TAILSCALE_URL` env var**: Child processes receive `PORTLESS_TAILSCALE_URL` containing the Tailscale HTTPS URL so apps can reference their public address. (#262)
+- **Tailscale URLs in `portless list`**: The list command now shows tailnet URLs alongside local URLs when Tailscale sharing is active. (#262)
+
+### Improvements
+
+- **`portless prune` cleans stale Tailscale registrations**: Prune now removes orphaned `tailscale serve` entries left behind by dead CLI sessions. (#262)
+- **`portless clean` removes Tailscale serve state**: Clean now tears down any Tailscale serve/funnel registrations alongside the usual CA and hosts file cleanup. (#262)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.11.1
 
 ### New Features
 
@@ -15,7 +34,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.11.0
 
