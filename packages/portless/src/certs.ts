@@ -15,8 +15,8 @@ const SERVER_VALIDITY_DAYS = 365;
 /** Buffer (in ms) subtracted from expiry to trigger early regeneration. */
 const EXPIRY_BUFFER_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-/** Common Name used for the portless local CA. */
-const CA_COMMON_NAME = "portless Local CA";
+/** Common Name used for the pless local CA. */
+const CA_COMMON_NAME = "pless Local CA";
 
 /** openssl command timeout (ms). */
 const OPENSSL_TIMEOUT_MS = 15_000;
@@ -432,7 +432,7 @@ export function ensureCerts(stateDir: string): {
 }
 
 /**
- * Check if the portless CA is already installed in the system trust store.
+ * Check if the pless CA is already installed in the system trust store.
  */
 export function isCATrusted(stateDir: string): boolean {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
@@ -594,7 +594,7 @@ function getLinuxCATrustConfig(): LinuxCATrustConfig {
  */
 function isCATrustedLinux(stateDir: string): boolean {
   const config = getLinuxCATrustConfig();
-  const systemCertPath = path.join(config.certDir, "portless-ca.crt");
+  const systemCertPath = path.join(config.certDir, "pless-ca.crt");
   if (!fileExists(systemCertPath)) return false;
 
   // Compare our CA with the installed one
@@ -844,7 +844,7 @@ export function createSNICallback(
 }
 
 /**
- * Add the portless CA to the system trust store.
+ * Add the pless CA to the system trust store.
  *
  * On macOS, adds to the login keychain (no sudo required; the OS shows a
  * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
@@ -857,7 +857,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
   if (!fileExists(caCertPath)) {
     return {
       trusted: false,
-      error: "CA certificate not found. Run portless trust to generate it.",
+      error: "CA certificate not found. Run pless trust to generate it.",
     };
   }
 
@@ -893,7 +893,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       if (!fs.existsSync(config.certDir)) {
         fs.mkdirSync(config.certDir, { recursive: true });
       }
-      const dest = path.join(config.certDir, "portless-ca.crt");
+      const dest = path.join(config.certDir, "pless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
       writeTrustMarker(stateDir);
@@ -915,8 +915,8 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
           ? "The macOS security command timed out. This can happen when the " +
             "Keychain Services daemon is unresponsive or a system authorization " +
             "dialog was not dismissed in time. Try restarting Keychain Access " +
-            "(or run: sudo killall securityd) and then: portless trust"
-          : "The trust command timed out. Try: portless trust";
+            "(or run: sudo killall securityd) and then: pless trust"
+          : "The trust command timed out. Try: pless trust";
       return { trusted: false, error: hint };
     }
     if (
@@ -926,7 +926,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
     ) {
       return {
         trusted: false,
-        error: "Permission denied. Try: portless trust",
+        error: "Permission denied. Try: pless trust",
       };
     }
     return { trusted: false, error: message };
@@ -934,7 +934,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
 }
 
 /**
- * Remove the portless CA from the system trust store (inverse of trustCA).
+ * Remove the pless CA from the system trust store (inverse of trustCA).
  * No-op when the CA is not trusted or ca.pem is missing in stateDir.
  */
 export function untrustCA(stateDir: string): { removed: boolean; error?: string } {
@@ -1027,7 +1027,7 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
   let deletedAny = false;
 
   for (const config of Object.values(LINUX_CA_TRUST_CONFIGS)) {
-    const dest = path.join(config.certDir, "portless-ca.crt");
+    const dest = path.join(config.certDir, "pless-ca.crt");
     try {
       if (fileExists(dest)) {
         const ours = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8").trim();
@@ -1056,7 +1056,7 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
       removed: false,
       error:
         errors.join("; ") ||
-        "CA still trusted (remove portless-ca.crt and run the distro CA update command, often with sudo)",
+        "CA still trusted (remove pless-ca.crt and run the distro CA update command, often with sudo)",
     };
   }
   return { removed: true };
@@ -1081,13 +1081,13 @@ function untrustCAWindows(caCertPath: string): { removed: boolean; error?: strin
       return { removed: true };
     }
 
-    execFileSync("certutil", ["-delstore", "-user", "Root", "portless Local CA"], {
+    execFileSync("certutil", ["-delstore", "-user", "Root", "pless Local CA"], {
       stdio: "pipe",
       timeout: 30_000,
     });
 
     if (isCATrustedWindows(caCertPath)) {
-      return { removed: false, error: "certutil could not remove the portless CA from Root" };
+      return { removed: false, error: "certutil could not remove the pless CA from Root" };
     }
     return { removed: true };
   } catch (err: unknown) {

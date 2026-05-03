@@ -63,15 +63,15 @@ function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<
 
 /**
  * Request header tracking how many times a request has passed through a
- * portless proxy. Used to detect forwarding loops (e.g. a frontend dev
- * server proxying back through portless without rewriting the Host header).
+ * pless proxy. Used to detect forwarding loops (e.g. a frontend dev server
+ * proxying back through pless without rewriting the Host header).
  */
 const PORTLESS_HOPS_HEADER = "x-portless-hops";
 
 /**
- * Maximum number of times a request may pass through the portless proxy
+ * Maximum number of times a request may pass through the pless proxy
  * before it is rejected as a loop. Two hops is normal when a frontend
- * proxies API calls to a separate portless-managed backend; five gives
+ * proxies API calls to a separate pless-managed backend; five gives
  * comfortable headroom for multi-tier setups while catching loops quickly.
  */
 const MAX_PROXY_HOPS = 5;
@@ -136,8 +136,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const hops = parseInt(req.headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
     if (hops >= MAX_PROXY_HOPS) {
       onError(
-        `Loop detected for ${host}: request has passed through portless ${hops} times. ` +
-          `This usually means a backend is proxying back through portless without rewriting ` +
+        `Loop detected for ${host}: request has passed through pless ${hops} times. ` +
+          `This usually means a backend is proxying back through pless without rewriting ` +
           `the Host header. If you use Vite/webpack proxy, set changeOrigin: true.`
       );
       res.writeHead(508, { "Content-Type": "text/html" });
@@ -145,7 +145,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         renderPage(
           508,
           "Loop Detected",
-          `<div class="content"><p class="desc">This request has passed through portless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
+          `<div class="content"><p class="desc">This request has passed through pless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through pless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
   "/api": {
     target: "${reqTls ? "https" : "http"}://&lt;backend&gt;${escapeHtml(tldSuffix)}${reqTls ? "" : ":&lt;port&gt;"}",
     changeOrigin: true,
@@ -171,7 +171,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         renderPage(
           404,
           "Not Found",
-          `<div class="content"><p class="desc">No app registered for <strong>${safeHost}</strong></p>${routesList}<div class="section"><div class="terminal"><span class="prompt">$ </span>portless ${safeSuggestion} your-command</div></div></div>`
+          `<div class="content"><p class="desc">No app registered for <strong>${safeHost}</strong></p>${routesList}<div class="section"><div class="terminal"><span class="prompt">$ </span>pless ${safeSuggestion} your-command</div></div></div>`
         )
       );
       return;
@@ -263,14 +263,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     if (hops >= MAX_PROXY_HOPS) {
       const host = getRequestHost(req).split(":")[0];
       onError(
-        `WebSocket loop detected for ${host}: request has passed through portless ${hops} times. ` +
+        `WebSocket loop detected for ${host}: request has passed through pless ${hops} times. ` +
           `Set changeOrigin: true in your proxy config.`
       );
       socket.end(
         "HTTP/1.1 508 Loop Detected\r\n" +
           "Content-Type: text/plain\r\n" +
           "\r\n" +
-          "Loop Detected: request has passed through portless too many times.\n" +
+          "Loop Detected: request has passed through pless too many times.\n" +
           "Add changeOrigin: true to your dev server proxy config.\n"
       );
       return;
@@ -404,9 +404,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
     plainServer.on("upgrade", (req: http.IncomingMessage, socket: net.Socket) => {
       const host = getRequestHost(req);
-      console.warn(
-        `[portless] Dropped plain-HTTP WebSocket upgrade for ${host}; use wss:// instead`
-      );
+      console.warn(`[pless] Dropped plain-HTTP WebSocket upgrade for ${host}; use wss:// instead`);
       socket.destroy();
     });
 

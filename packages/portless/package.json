@@ -1,7 +1,7 @@
 {
-  "name": "portless",
+  "name": "pless",
   "version": "0.12.0",
-  "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+  "description": "Tailscale-first devbox gateway for stable local development URLs.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,7 +12,7 @@
     }
   },
   "bin": {
-    "portless": "./dist/cli.js"
+    "pless": "./dist/cli.js"
   },
   "files": [
     "dist"
@@ -40,17 +40,17 @@
     "local",
     "development",
     "proxy",
-    "localhost"
+    "localhost",
+    "tailscale"
   ],
-  "author": "Vercel Labs",
+  "author": "Gabriel Alfonzo",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vercel-labs/portless.git"
+    "url": "https://github.com/NarukeAlpha/portless-tailscale.git"
   },
-  "homepage": "https://portless.sh",
   "bugs": {
-    "url": "https://github.com/vercel-labs/portless/issues"
+    "url": "https://github.com/NarukeAlpha/portless-tailscale/issues"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

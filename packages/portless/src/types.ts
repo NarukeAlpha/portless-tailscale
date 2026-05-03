@@ -1,7 +1,16 @@
 /** Route info used by the proxy server to map hostnames to ports. */
 export interface RouteInfo {
+  id?: string;
   hostname: string;
   port: number;
+  pid?: number;
+  appName?: string;
+  cwd?: string;
+  folder?: string;
+  command?: string;
+  startedAt?: string;
+  localUrl?: string;
+  gatewayUrl?: string;
 }
 
 export interface ProxyServerOptions {

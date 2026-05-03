@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
 
-/** Filenames portless creates under a state directory (allowlisted for clean). */
+/** Filenames pless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
   "routes.json",
   "routes.lock",
@@ -12,6 +12,10 @@ const PORTLESS_STATE_FILES = [
   "proxy.tls",
   "proxy.tld",
   "proxy.lan",
+  "gateway.pid",
+  "gateway.port",
+  "gateway.url",
+  "gateway.log",
   "ca-key.pem",
   "ca.pem",
   "server-key.pem",
@@ -25,7 +29,7 @@ const HOST_CERTS_DIR = "host-certs";
 
 /**
  * Unique existing state directories to consider for cleanup: user dir, system
- * dir, and PORTLESS_STATE_DIR when set.
+ * dir, and PLESS_STATE_DIR / PORTLESS_STATE_DIR when set.
  */
 export function collectStateDirsForCleanup(): string[] {
   const dirs = new Set<string>();
@@ -37,12 +41,13 @@ export function collectStateDirsForCleanup(): string[] {
   };
   add(USER_STATE_DIR);
   add(LEGACY_SYSTEM_STATE_DIR);
+  add(process.env.PLESS_STATE_DIR);
   add(process.env.PORTLESS_STATE_DIR);
   return [...dirs];
 }
 
 /**
- * Best-effort removal of portless state files under dir. Only known filenames
+ * Best-effort removal of pless state files under dir. Only known filenames
  * are deleted; other files in the directory are left intact.
  */
 export function removePortlessStateFiles(dir: string): void {

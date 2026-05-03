@@ -216,7 +216,7 @@ export interface RegisterServeOptions {
 }
 
 const CONFLICT_MESSAGES: Record<TailscaleMode, string> = {
-  serve: "Stop the existing serve or let portless auto-assign a different port.",
+  serve: "Stop the existing serve or let pless auto-assign a different port.",
   funnel: "Tailscale Funnel supports ports 443, 8443, and 10000.",
 };
 

@@ -16,6 +16,9 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     ...options?.env,
     NO_COLOR: "1",
   };
+  if (env.PLESS_TAILSCALE === undefined && env.PORTLESS_TAILSCALE === undefined) {
+    env.PLESS_TAILSCALE = "0";
+  }
   // Vitest runs under pnpm; strip parent-only vars so the CLI child does not look like pnpm dlx / npx.
   delete env.PNPM_SCRIPT_SRC_DIR;
   if (env.npm_command === "exec") {
@@ -70,7 +73,7 @@ function writeExpoShim(dir: string): void {
 async function getFreePort(): Promise<number> {
   const server = http.createServer();
   try {
-    const port = await new Promise<number>((resolve) => {
+    return await new Promise<number>((resolve) => {
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
         if (addr && typeof addr !== "string") {
@@ -78,7 +81,6 @@ async function getFreePort(): Promise<number> {
         }
       });
     });
-    return port;
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -95,19 +97,19 @@ describe("CLI", () => {
     it("prints help and exits 0 with --help", () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless");
+      expect(stdout).toContain("pless");
       expect(stdout).toContain("Usage:");
       expect(stdout).toContain("Examples:");
       expect(stdout).toContain("proxy start");
-      expect(stdout).toContain("portless run");
-      expect(stdout).toContain("portless get");
+      expect(stdout).toContain("pless run");
+      expect(stdout).toContain("pless get");
       expect(stdout).toContain("run [--name <name>]");
       expect(stdout).toContain("--port");
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
-      expect(stdout).toContain("PORTLESS_STATE_DIR");
-      expect(stdout).toContain("PORTLESS_URL");
-      expect(stdout).toContain("portless clean");
+      expect(stdout).toContain("PLESS_STATE_DIR");
+      expect(stdout).toContain("PLESS_URL");
+      expect(stdout).toContain("pless clean");
     });
 
     it("prints help and exits 0 with -h", () => {
@@ -324,7 +326,7 @@ describe("CLI", () => {
     it("prints run-specific help for run --help", () => {
       const { status, stdout } = run(["run", "--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless run");
+      expect(stdout).toContain("pless run");
       expect(stdout).toContain("--force");
       expect(stdout).toContain("--app-port");
     });
@@ -332,7 +334,7 @@ describe("CLI", () => {
     it("prints run-specific help for run -h", () => {
       const { status, stdout } = run(["run", "-h"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless run");
+      expect(stdout).toContain("pless run");
     });
   });
 
@@ -374,14 +376,14 @@ describe("CLI", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["alias", "--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless alias");
+      expect(stdout).toContain("pless alias");
       expect(stdout).toContain("--remove");
     });
 
     it("prints help with -h", () => {
       const { status, stdout } = run(["alias", "-h"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless alias");
+      expect(stdout).toContain("pless alias");
     });
 
     it("exits 1 with usage when no args given", () => {
@@ -413,7 +415,7 @@ describe("CLI", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["hosts", "--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless hosts");
+      expect(stdout).toContain("pless hosts");
       expect(stdout).toContain("sync");
       expect(stdout).toContain("clean");
     });
@@ -421,7 +423,7 @@ describe("CLI", () => {
     it("prints help with -h", () => {
       const { status, stdout } = run(["hosts", "-h"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless hosts");
+      expect(stdout).toContain("pless hosts");
     });
 
     it("shows usage for bare 'hosts' without subcommand", () => {
@@ -442,14 +444,14 @@ describe("CLI", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["clean", "--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless clean");
+      expect(stdout).toContain("pless clean");
       expect(stdout).toContain("trust store");
     });
 
     it("prints help with -h", () => {
       const { status, stdout } = run(["clean", "-h"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless clean");
+      expect(stdout).toContain("pless clean");
     });
 
     it("rejects unknown arguments", () => {
@@ -481,7 +483,7 @@ describe("CLI", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["proxy", "--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless proxy");
+      expect(stdout).toContain("pless proxy");
       expect(stdout).toContain("start");
       expect(stdout).toContain("stop");
     });
@@ -489,7 +491,7 @@ describe("CLI", () => {
     it("prints help with -h", () => {
       const { status, stdout } = run(["proxy", "-h"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless proxy");
+      expect(stdout).toContain("pless proxy");
     });
 
     it("shows usage for bare 'proxy' without subcommand", () => {
@@ -530,7 +532,7 @@ describe("CLI", () => {
         expect(status).toBe(1);
         expect(stderr).toContain("Proxy is already running on port");
         expect(stderr).toContain("requested LAN mode");
-        expect(stderr).toContain("portless proxy stop");
+        expect(stderr).toContain("pless proxy stop");
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -924,14 +926,14 @@ describe("CLI", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["get", "--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless get");
+      expect(stdout).toContain("pless get");
       expect(stdout).toContain("--no-worktree");
     });
 
     it("prints help with -h", () => {
       const { status, stdout } = run(["get", "-h"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("portless get");
+      expect(stdout).toContain("pless get");
     });
 
     it("exits 1 with usage when no name given", () => {
@@ -1147,10 +1149,20 @@ describe("CLI", () => {
 
         // HTTPS is on by default (no PORTLESS_HTTPS=0), so this exercises
         // cert generation, the failing trust check, and daemon startup.
+        const childEnv: Record<string, string | undefined> = {
+          ...process.env,
+          ...env,
+          NO_COLOR: "1",
+          PLESS_TAILSCALE: "0",
+        };
+        delete childEnv.PNPM_SCRIPT_SRC_DIR;
+        if (childEnv.npm_command === "exec") {
+          delete childEnv.npm_command;
+        }
         const start = spawnSync(process.execPath, [CLI_PATH, "proxy", "start"], {
           encoding: "utf-8",
           timeout: 30_000,
-          env: { ...process.env, ...env, NO_COLOR: "1" },
+          env: childEnv,
         });
 
         // The proxy should start despite the broken security binary.
@@ -1330,7 +1342,7 @@ describe("CLI", () => {
       expect(status).toBe(0);
       expect(stdout).toContain("--tailscale");
       expect(stdout).toContain("--funnel");
-      expect(stdout).toContain("PORTLESS_TAILSCALE");
+      expect(stdout).toContain("PLESS_TAILSCALE");
     });
 
     it("fails with actionable message when tailscale is not installed", () => {

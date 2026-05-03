@@ -42,7 +42,7 @@ export const LEGACY_SYSTEM_STATE_DIR = isWindows
   : "/tmp/portless";
 
 /** Per-user state directory. All proxy state lives here regardless of port. */
-export const USER_STATE_DIR = path.join(os.homedir(), ".portless");
+export const USER_STATE_DIR = path.join(os.homedir(), ".pless");
 
 /** Minimum app port when finding a free port. */
 const MIN_APP_PORT = 4000;
@@ -68,6 +68,32 @@ export const BLOCKED_PORTS: ReadonlySet<number> = new Set([
   995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
   6669, 6679, 6697, 10080,
 ]);
+
+export function getEnv(name: string): string | undefined {
+  return process.env[`PLESS_${name}`] ?? process.env[`PORTLESS_${name}`];
+}
+
+export function setEnv(name: string, value: string): void {
+  process.env[`PLESS_${name}`] = value;
+  process.env[`PORTLESS_${name}`] = value;
+}
+
+export function hasEnv(name: string): boolean {
+  return (
+    process.env[`PLESS_${name}`] !== undefined || process.env[`PORTLESS_${name}`] !== undefined
+  );
+}
+
+export function isEnvEnabled(name: string, defaultValue = false): boolean {
+  const val = getEnv(name);
+  if (val === undefined) return defaultValue;
+  return val === "1" || val === "true";
+}
+
+export function isEnvDisabled(name: string): boolean {
+  const val = getEnv(name);
+  return val === "0" || val === "false";
+}
 
 /** TCP connect timeout (ms) when checking if something is listening. */
 const SOCKET_TIMEOUT_MS = 500;
@@ -133,13 +159,13 @@ export function getProtocolPort(tls: boolean): number {
 }
 
 /**
- * Return the effective default proxy port. Reads the PORTLESS_PORT env var
+ * Return the effective default proxy port. Reads PLESS_PORT / PORTLESS_PORT
  * first, then falls back to the protocol-standard port (443 for HTTPS,
  * 80 for HTTP). When `tls` is undefined the legacy fallback (1355) is used
  * so callers that don't yet know the protocol get backward-compatible behavior.
  */
 export function getDefaultPort(tls?: boolean): number {
-  const envPort = process.env.PORTLESS_PORT;
+  const envPort = getEnv("PORT");
   if (envPort) {
     const port = parseInt(envPort, 10);
     if (!isNaN(port) && port >= 1 && port <= 65535) return port;
@@ -153,10 +179,12 @@ export function getDefaultPort(tls?: boolean): number {
 
 /**
  * Determine the state directory for a given proxy port.
- * Always returns USER_STATE_DIR (~/.portless) unless PORTLESS_STATE_DIR is set.
+ * Always returns USER_STATE_DIR (~/.pless) unless PLESS_STATE_DIR /
+ * PORTLESS_STATE_DIR is set.
  */
 export function resolveStateDir(_port?: number): string {
-  if (process.env.PORTLESS_STATE_DIR) return process.env.PORTLESS_STATE_DIR;
+  const stateDir = getEnv("STATE_DIR");
+  if (stateDir) return stateDir;
   return USER_STATE_DIR;
 }
 
@@ -289,7 +317,7 @@ export function writeTldFile(dir: string, tld: string): void {
  * falling back to DEFAULT_TLD ("localhost"). Throws on invalid values.
  */
 export function getDefaultTld(): string {
-  const val = process.env.PORTLESS_TLD?.trim().toLowerCase();
+  const val = getEnv("TLD")?.trim().toLowerCase();
   if (!val) return DEFAULT_TLD;
   const err = validateTld(val);
   if (err) throw new Error(`PORTLESS_TLD: ${err}`);
@@ -301,17 +329,15 @@ export function getDefaultTld(): string {
  * check whether it is disabled rather than enabled.
  */
 export function isHttpsEnvEnabled(): boolean {
-  const val = process.env.PORTLESS_HTTPS;
-  return val === "1" || val === "true";
+  return isEnvEnabled("HTTPS");
 }
 
 /**
- * Return whether HTTPS is explicitly disabled via the PORTLESS_HTTPS env var.
- * PORTLESS_HTTPS=0 is the env-var equivalent of --no-tls.
+ * Return whether HTTPS is explicitly disabled via PLESS_HTTPS / PORTLESS_HTTPS.
+ * PLESS_HTTPS=0 is the env-var equivalent of --no-tls.
  */
 export function isHttpsEnvDisabled(): boolean {
-  const val = process.env.PORTLESS_HTTPS;
-  return val === "0" || val === "false";
+  return isEnvDisabled("HTTPS");
 }
 
 /**
@@ -319,16 +345,14 @@ export function isHttpsEnvDisabled(): boolean {
  * PORTLESS_WILDCARD env var.
  */
 export function isWildcardEnvEnabled(): boolean {
-  const val = process.env.PORTLESS_WILDCARD;
-  return val === "1" || val === "true";
+  return isEnvEnabled("WILDCARD");
 }
 
 /**
  * Return whether LAN mode is requested via the PORTLESS_LAN env var.
  */
 export function isLanEnvEnabled(): boolean {
-  const val = process.env.PORTLESS_LAN;
-  return val === "1" || val === "true";
+  return isEnvEnabled("LAN");
 }
 
 /**
@@ -345,7 +369,7 @@ export function readPersistedProxyState(): {
   tld: string;
   lanMode: boolean;
 } | null {
-  const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
+  const dir = getEnv("STATE_DIR") || USER_STATE_DIR;
   const port = readPortFromDir(dir);
   if (port !== null) {
     const tls = readTlsMarker(dir);
@@ -431,8 +455,9 @@ export async function discoverState(): Promise<{
   lanIp: string | null;
 }> {
   // Env var override
-  if (process.env.PORTLESS_STATE_DIR) {
-    const dir = process.env.PORTLESS_STATE_DIR;
+  const envStateDir = getEnv("STATE_DIR");
+  if (envStateDir) {
+    const dir = envStateDir;
     const port = readPortFromDir(dir) ?? getDefaultPort();
     const lanIp = readLanMarker(dir);
     if ((await isProxyRunning(port)) || (await isPortListening(port))) {
@@ -451,7 +476,7 @@ export async function discoverState(): Promise<{
     };
   }
 
-  // Check user-level state first (~/.portless)
+  // Check user-level state first (~/.pless)
   const userPort = readPortFromDir(USER_STATE_DIR);
   if (userPort !== null) {
     // Always use plain HTTP for the liveness check. The TLS-enabled proxy
@@ -569,9 +594,9 @@ export async function findFreePort(
 }
 
 /**
- * Check if a portless proxy is listening on the given port at 127.0.0.1.
+ * Check if a pless proxy is listening on the given port at 127.0.0.1.
  * Makes an HTTP(S) request and verifies the X-Portless response header to
- * distinguish the portless proxy from unrelated services.
+ * distinguish the pless proxy from unrelated services.
  *
  * When `tls` is true, uses HTTPS with certificate verification disabled
  * (the proxy may use a self-signed or locally-trusted CA cert).
@@ -928,7 +953,7 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * Handles both direct invocation (`vite dev`) and invocation via package
  * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
  *
- * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
+ * The pless proxy connects to 127.0.0.1 (IPv4), so we also inject
  * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
  *
  * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:

@@ -25,11 +25,12 @@ export interface LoadedConfig {
   configDir: string;
 }
 
-const CONFIG_FILENAME = "portless.json";
+const CONFIG_FILENAME = "pless.json";
+const LEGACY_CONFIG_FILENAME = "portless.json";
 
 /**
- * Load portless config from `cwd`. Checks `portless.json` first, then
- * falls back to a `"portless"` key in `package.json`. Does not walk up
+ * Load pless config from `cwd`. Checks `pless.json` first, then the upstream
+ * `portless.json`, then falls back to package.json keys. Does not walk up
  * to parent directories.
  */
 export function loadConfig(cwd: string = process.cwd()): LoadedConfig | null {
@@ -41,7 +42,21 @@ export function loadConfig(cwd: string = process.cwd()): LoadedConfig | null {
     return { config: parsed, configDir: cwd };
   } catch (err) {
     if (isErrnoException(err) && err.code === "ENOENT") {
-      return loadConfigFromPackageJson(cwd);
+      const legacyPath = path.join(cwd, LEGACY_CONFIG_FILENAME);
+      try {
+        const raw = fs.readFileSync(legacyPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        validateConfig(parsed, legacyPath);
+        return { config: parsed, configDir: cwd };
+      } catch (legacyErr) {
+        if (isErrnoException(legacyErr) && legacyErr.code === "ENOENT") {
+          return loadConfigFromPackageJson(cwd);
+        }
+        if (legacyErr instanceof SyntaxError) {
+          throw new ConfigValidationError(`Invalid JSON in ${legacyPath}`);
+        }
+        throw legacyErr;
+      }
     }
     if (err instanceof SyntaxError) {
       throw new ConfigValidationError(`Invalid JSON in ${configPath}`);
@@ -50,7 +65,7 @@ export function loadConfig(cwd: string = process.cwd()): LoadedConfig | null {
   }
 }
 
-/** Normalize the raw `"portless"` value: a string is shorthand for `{ name }`. */
+/** Normalize the raw `"pless"` / `"portless"` value: a string is shorthand for `{ name }`. */
 function normalizePortlessValue(value: unknown): unknown {
   if (typeof value === "string") {
     return value.trim() ? { name: value.trim() } : null;
@@ -63,10 +78,11 @@ function loadConfigFromPackageJson(dir: string): LoadedConfig | null {
   try {
     const raw = fs.readFileSync(pkgPath, "utf-8");
     const pkg = JSON.parse(raw);
-    if (pkg && typeof pkg === "object" && "portless" in pkg) {
-      const config = normalizePortlessValue(pkg.portless);
+    if (pkg && typeof pkg === "object" && ("pless" in pkg || "portless" in pkg)) {
+      const key = "pless" in pkg ? "pless" : "portless";
+      const config = normalizePortlessValue(pkg[key]);
       if (config === null) return null;
-      validateConfig(config, `${pkgPath} "portless"`);
+      validateConfig(config, `${pkgPath} "${key}"`);
       return { config: config as PortlessConfig, configDir: dir };
     }
   } catch (err) {
@@ -78,7 +94,7 @@ function loadConfigFromPackageJson(dir: string): LoadedConfig | null {
 }
 
 /**
- * Load the `"portless"` config from a specific directory's package.json
+ * Load the `"pless"` config from a specific directory's package.json
  * (does not walk up). Returns the AppConfig fields or null.
  */
 export function loadPackagePortlessConfig(dir: string): AppConfig | null {
@@ -86,11 +102,12 @@ export function loadPackagePortlessConfig(dir: string): AppConfig | null {
   try {
     const raw = fs.readFileSync(pkgPath, "utf-8");
     const pkg = JSON.parse(raw);
-    if (pkg && typeof pkg === "object" && "portless" in pkg) {
-      const config = normalizePortlessValue(pkg.portless);
+    if (pkg && typeof pkg === "object" && ("pless" in pkg || "portless" in pkg)) {
+      const key = "pless" in pkg ? "pless" : "portless";
+      const config = normalizePortlessValue(pkg[key]);
       if (config === null) return null;
       if (typeof config === "object" && !Array.isArray(config)) {
-        validateAppConfig(config as Record<string, unknown>, "portless", pkgPath);
+        validateAppConfig(config as Record<string, unknown>, key, pkgPath);
         return config as AppConfig;
       }
     }

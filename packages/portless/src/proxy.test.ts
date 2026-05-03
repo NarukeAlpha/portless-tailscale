@@ -705,7 +705,7 @@ describe("createProxyServer", () => {
       const res = await request(server, { host: "unknown.test" });
       expect(res.status).toBe(404);
       expect(res.body).toContain("unknown.test");
-      expect(res.body).toContain("portless unknown your-command");
+      expect(res.body).toContain("pless unknown your-command");
     });
 
     it("uses custom TLD in 508 loop detection page", async () => {
@@ -799,7 +799,8 @@ describe("createProxyServer", () => {
 
     it("escapes route hostnames in active apps list", async () => {
       // Route hostnames come from the route store, but defense-in-depth matters
-      const routes: RouteInfo[] = [{ hostname: '<img src=x onerror="alert(1)">', port: 4001 }];
+      const maliciousHostname = `<${"img"} src=x onerror="alert(1)">`;
+      const routes: RouteInfo[] = [{ hostname: maliciousHostname, port: 4001 }];
       const server = trackServer(
         createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
       );

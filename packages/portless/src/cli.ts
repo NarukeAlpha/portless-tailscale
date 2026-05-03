@@ -4,10 +4,12 @@ declare const __VERSION__: string;
 
 import colors from "./colors.js";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
+import { createGatewayServer, PLESS_GATEWAY_HEADER } from "./gateway.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile, shouldAutoSyncHosts } from "./hosts.js";
@@ -43,7 +45,11 @@ import {
   findPidsOnPort,
   getDefaultPort,
   getDefaultTld,
+  getEnv,
+  hasEnv,
   injectFrameworkFlags,
+  isEnvDisabled,
+  isEnvEnabled,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -56,6 +62,7 @@ import {
   readTldFromDir,
   readTlsMarker,
   resolveStateDir,
+  setEnv,
   spawnCommand,
   augmentedPath,
   validateTld,
@@ -97,6 +104,8 @@ import {
 import type { ManifestEntry } from "./turbo.js";
 
 const chalk = colors;
+const CLI_NAME = "pless";
+const LEGACY_CLI_NAME = "portless";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -116,6 +125,58 @@ const EXIT_TIMEOUT_MS = 2000;
 
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
+
+/** Port range for the local gateway that Tailscale Serve forwards to. */
+const MIN_GATEWAY_PORT = 37_500;
+const MAX_GATEWAY_PORT = 37_599;
+
+const GATEWAY_PORT_FILE = "gateway.port";
+const GATEWAY_PID_FILE = "gateway.pid";
+const GATEWAY_URL_FILE = "gateway.url";
+
+function commandName(): string {
+  return CLI_NAME;
+}
+
+function normalizeEnvAliases(): void {
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("PLESS_") || value === undefined) continue;
+    const legacyKey = `PORTLESS_${key.slice("PLESS_".length)}`;
+    if (process.env[legacyKey] === undefined) {
+      process.env[legacyKey] = value;
+    }
+  }
+}
+
+function isTailscaleDisabled(): boolean {
+  return isEnvDisabled("TAILSCALE") || process.env.PLESS === "0" || process.env.PLESS === "false";
+}
+
+function wantsGatewayTailscale(): boolean {
+  return !isTailscaleDisabled() && !isEnvEnabled("TAILSCALE_DIRECT") && !isEnvEnabled("FUNNEL");
+}
+
+function wantsDirectTailscale(): boolean {
+  return isEnvEnabled("TAILSCALE_DIRECT") || isEnvEnabled("FUNNEL");
+}
+
+function getRouteMetadata(options: {
+  appName: string;
+  cwd: string;
+  commandArgs: string[];
+  localUrl: string;
+  gatewayUrl?: string;
+}) {
+  return {
+    appName: options.appName,
+    cwd: options.cwd,
+    folder: path.basename(options.cwd),
+    command: options.commandArgs.join(" "),
+    startedAt: new Date().toISOString(),
+    localUrl: options.localUrl,
+    ...(options.gatewayUrl ? { gatewayUrl: options.gatewayUrl } : {}),
+  };
+}
 
 type ProxyConfigExplicitness = {
   useHttps: boolean;
@@ -295,7 +356,7 @@ function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string
     includePort: proxyPort !== getDefaultPort(config.useHttps),
     proxyPort,
   });
-  return `${needsSudo ? "sudo " : ""}portless proxy start${args.length > 0 ? ` ${args.join(" ")}` : ""}`;
+  return `${needsSudo ? "sudo " : ""}pless proxy start${args.length > 0 ? ` ${args.join(" ")}` : ""}`;
 }
 
 function printProxyConfigMismatch(
@@ -312,32 +373,35 @@ function printProxyConfigMismatch(
     console.error(chalk.yellow(`- ${message}`));
   }
   console.error(chalk.blue("Stop it first, then restart with the desired settings:"));
-  console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy stop${portFlag}`));
+  console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}pless proxy stop${portFlag}`));
   console.error(chalk.cyan(`  ${formatProxyStartCommand(proxyPort, desiredConfig)}`));
   process.exit(1);
 }
 
 /**
- * Return the path to the portless entry script. Guards against the
+ * Return the path to the pless entry script. Guards against the
  * (unlikely) case where process.argv[1] is undefined.
  */
 function getEntryScript(): string {
   const script = process.argv[1];
   if (!script) {
-    throw new Error("Cannot determine portless entry script (process.argv[1] is undefined)");
+    throw new Error("Cannot determine pless entry script (process.argv[1] is undefined)");
   }
   return script;
 }
 
 /**
- * Check whether portless is installed as a project dependency by walking
- * up from cwd looking for node_modules/portless. Used to distinguish a
- * local `npx portless` (allowed) from a one-off download (blocked).
+ * Check whether pless is installed as a project dependency by walking
+ * up from cwd looking for node_modules/pless. Used to distinguish a
+ * local `npx pless` (allowed) from a one-off download (blocked).
  */
 function isLocallyInstalled(): boolean {
   let dir = process.cwd();
   for (;;) {
-    if (fs.existsSync(path.join(dir, "node_modules", "portless", "package.json"))) {
+    if (
+      fs.existsSync(path.join(dir, "node_modules", CLI_NAME, "package.json")) ||
+      fs.existsSync(path.join(dir, "node_modules", LEGACY_CLI_NAME, "package.json"))
+    ) {
       return true;
     }
     const parent = path.dirname(dir);
@@ -354,7 +418,7 @@ function isLocallyInstalled(): boolean {
 function collectPortlessEnvArgs(): string[] {
   const envArgs: string[] = [];
   for (const key of Object.keys(process.env)) {
-    if (key.startsWith("PORTLESS_") && process.env[key]) {
+    if ((key.startsWith("PORTLESS_") || key.startsWith("PLESS_")) && process.env[key]) {
       envArgs.push(`${key}=${process.env[key]}`);
     }
   }
@@ -362,7 +426,7 @@ function collectPortlessEnvArgs(): string[] {
 }
 
 /**
- * Re-run `portless proxy stop` under sudo. Returns true if sudo succeeded.
+ * Re-run `pless proxy stop` under sudo. Returns true if sudo succeeded.
  */
 function sudoStop(port: number): boolean {
   const stopArgs = [process.execPath, getEntryScript(), "proxy", "stop", "-p", String(port)];
@@ -391,7 +455,7 @@ function startProxyServer(
   const isTls = !!tlsOptions;
   const mdnsSupport = isMdnsSupported();
   let activeLanIp = lanIp && mdnsSupport.supported ? lanIp : null;
-  const lanIpPinned = !!process.env.PORTLESS_LAN_IP;
+  const lanIpPinned = !!getEnv("LAN_IP");
   let lanMonitor: ReturnType<typeof startLanIpMonitor> | null = null;
   if (lanIp && !mdnsSupport.supported) {
     const reason = mdnsSupport.reason ?? "mDNS publishing is not supported on this platform.";
@@ -416,7 +480,7 @@ function startProxyServer(
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
-  const autoSyncHosts = shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
+  const autoSyncHosts = shouldAutoSyncHosts(getEnv("SYNC_HOSTS"));
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
@@ -509,7 +573,7 @@ function startProxyServer(
     if (err.code === "EADDRINUSE") {
       console.error(colors.red(`Port ${proxyPort} is already in use.`));
       console.error(colors.blue("Stop the existing proxy first:"));
-      console.error(colors.cyan("  portless proxy stop"));
+      console.error(colors.cyan("  pless proxy stop"));
       console.error(colors.blue("Or check what is using the port:"));
       console.error(
         colors.cyan(
@@ -519,7 +583,7 @@ function startProxyServer(
     } else if (err.code === "EACCES") {
       console.error(colors.red(`Permission denied for port ${proxyPort}.`));
       console.error(colors.blue("Use an unprivileged port (no sudo needed):"));
-      console.error(colors.cyan("  portless proxy start -p 1355"));
+      console.error(colors.cyan("  pless proxy start -p 1355"));
     } else {
       console.error(colors.red(`Proxy error: ${err.message}`));
     }
@@ -626,12 +690,12 @@ function sudoStopOrHint(port: number): void {
     if (!sudoStop(port)) {
       console.error(colors.red("Failed to stop proxy with sudo."));
       console.error(colors.blue("Try manually:"));
-      console.error(colors.cyan(`  portless proxy stop -p ${port}`));
+      console.error(colors.cyan(`  pless proxy stop -p ${port}`));
     }
   } else {
     console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
     console.error(colors.blue("Stop it with:"));
-    console.error(colors.cyan("  Run portless proxy stop as Administrator"));
+    console.error(colors.cyan("  Run pless proxy stop as Administrator"));
   }
 }
 
@@ -764,12 +828,133 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   }
 }
 
+function readNumberFile(filePath: string): number | null {
+  try {
+    const parsed = parseInt(fs.readFileSync(filePath, "utf-8").trim(), 10);
+    return isNaN(parsed) ? null : parsed;
+  } catch {
+    return null;
+  }
+}
+
+function gatewayPortPath(stateDir: string): string {
+  return path.join(stateDir, GATEWAY_PORT_FILE);
+}
+
+function gatewayPidPath(stateDir: string): string {
+  return path.join(stateDir, GATEWAY_PID_FILE);
+}
+
+function gatewayUrlPath(stateDir: string): string {
+  return path.join(stateDir, GATEWAY_URL_FILE);
+}
+
+function isGatewayRunning(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/_pless/health",
+        method: "GET",
+        timeout: 500,
+      },
+      (res) => {
+        res.resume();
+        resolve(res.headers[PLESS_GATEWAY_HEADER.toLowerCase()] === "1");
+      }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
+async function ensureGatewayRunning(stateDir: string): Promise<number> {
+  const existing = readNumberFile(gatewayPortPath(stateDir));
+  if (existing !== null && (await isGatewayRunning(existing))) {
+    return existing;
+  }
+
+  const gatewayPort = await findFreePort(MIN_GATEWAY_PORT, MAX_GATEWAY_PORT);
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o755 });
+  const logPath = path.join(stateDir, "gateway.log");
+  const logFd = fs.openSync(logPath, "a");
+  try {
+    const child = spawn(
+      process.execPath,
+      [getEntryScript(), "gateway", "start", "--port", String(gatewayPort), "--foreground"],
+      {
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        env: {
+          ...process.env,
+          PLESS_STATE_DIR: stateDir,
+          PORTLESS_STATE_DIR: stateDir,
+        },
+        windowsHide: true,
+      }
+    );
+    child.unref();
+  } finally {
+    fs.closeSync(logFd);
+  }
+
+  for (let i = 0; i < WAIT_FOR_PROXY_MAX_ATTEMPTS; i++) {
+    await new Promise((resolve) => setTimeout(resolve, WAIT_FOR_PROXY_INTERVAL_MS));
+    if (await isGatewayRunning(gatewayPort)) {
+      return gatewayPort;
+    }
+  }
+
+  console.error(colors.red("Tailscale gateway failed to start."));
+  console.error(colors.gray(`Logs: ${logPath}`));
+  process.exit(1);
+}
+
+function stopGateway(stateDir: string): void {
+  const pid = readNumberFile(gatewayPidPath(stateDir));
+  const port = readNumberFile(gatewayPortPath(stateDir));
+  if (pid !== null) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // Process may already be gone; cleanup files below.
+    }
+  }
+  for (const filePath of [
+    gatewayPidPath(stateDir),
+    gatewayPortPath(stateDir),
+    gatewayUrlPath(stateDir),
+  ]) {
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      // Already absent.
+    }
+  }
+  if (port !== null) {
+    console.log(colors.green(`Stopped Tailscale gateway on port ${port}.`));
+  }
+}
+
+async function ensureTailscaleGateway(stateDir: string, baseUrl: string): Promise<string> {
+  const gatewayPort = await ensureGatewayRunning(stateDir);
+  registerServe(gatewayPort, 443);
+  const gatewayUrl = formatTailscaleUrl(baseUrl, 443);
+  fs.writeFileSync(gatewayUrlPath(stateDir), gatewayUrl, { mode: FILE_MODE });
+  return gatewayUrl;
+}
+
 function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   const routes = store.loadRoutes();
 
   if (routes.length === 0) {
     console.log(colors.yellow("No active routes."));
-    console.log(colors.gray("Start an app with: portless <name> <command>"));
+    console.log(colors.gray("Start an app with: pless <name> <command>"));
     return;
   }
 
@@ -783,6 +968,12 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
     if (route.tailscaleUrl) {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
+    }
+    if (route.gatewayUrl) {
+      const app = route.appName || route.hostname.split(".")[0];
+      console.log(
+        `    ${colors.gray("gateway:")} ${colors.green(`${route.gatewayUrl}/${encodeURIComponent(app)}/${route.port}`)}`
+      );
     }
   }
   console.log();
@@ -801,12 +992,12 @@ interface ProxyDesiredState {
 function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
   const envTld = getDefaultTld();
   const explicit: ProxyConfigExplicitness = {
-    useHttps: process.env.PORTLESS_HTTPS !== undefined,
+    useHttps: hasEnv("HTTPS"),
     customCert: false,
-    lanMode: process.env.PORTLESS_LAN !== undefined,
-    lanIp: process.env.PORTLESS_LAN_IP !== undefined,
-    tld: process.env.PORTLESS_TLD !== undefined,
-    useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
+    lanMode: hasEnv("LAN"),
+    lanIp: hasEnv("LAN_IP"),
+    tld: hasEnv("TLD"),
+    useWildcard: hasEnv("WILDCARD"),
   };
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
@@ -816,7 +1007,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     customCertPath: null,
     customKeyPath: null,
     lanMode: isLanEnvEnabled(),
-    lanIp: process.env.PORTLESS_LAN_IP || null,
+    lanIp: getEnv("LAN_IP") || null,
     tld: envTld,
     useWildcard: isWildcardEnvEnabled(),
   });
@@ -836,8 +1027,7 @@ async function ensureProxyRunning(
   const { explicit, desiredConfig } = desired;
 
   const proxyResponsive = await isProxyRunning(proxyPort, tls);
-  const proxyListeningFromStateDir =
-    !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
+  const proxyListeningFromStateDir = hasEnv("STATE_DIR") && (await isPortListening(proxyPort));
 
   if (proxyResponsive || proxyListeningFromStateDir) {
     return { started: false };
@@ -868,7 +1058,7 @@ async function ensureProxyRunning(
   const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
   const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
 
-  const isInteractive = !!process.stdin.isTTY && !process.env.CI;
+  const isInteractive = process.stdin.isTTY && !process.env.CI;
 
   if (needsSudo && !isInteractive) {
     console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
@@ -946,21 +1136,25 @@ async function runApp(
   lanIp?: string | null
 ) {
   let store = initialStore;
-  console.log(chalk.blue.bold(`\nportless\n`));
+  console.log(chalk.blue.bold(`\n${commandName()}\n`));
+
+  // Validate the app label before any network-side setup so local input
+  // errors are reported before Tailscale readiness errors.
+  parseHostname(name, tld);
 
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
-  const wantsFunnel = process.env.PORTLESS_FUNNEL === "1" || process.env.PORTLESS_FUNNEL === "true";
-  const wantsTailscale =
-    wantsFunnel ||
-    process.env.PORTLESS_TAILSCALE === "1" ||
-    process.env.PORTLESS_TAILSCALE === "true";
+  const wantsFunnel = isEnvEnabled("FUNNEL");
+  const wantsTailscaleGateway = wantsGatewayTailscale();
+  const wantsTailscaleDirect = wantsDirectTailscale();
   let tsBaseUrl: string | undefined;
+  let tailscaleHost: string | undefined;
 
-  if (wantsTailscale) {
+  if (wantsTailscaleGateway || wantsTailscaleDirect) {
     try {
       const tsReady = ensureTailscaleReady();
       tsBaseUrl = tsReady.baseUrl;
+      tailscaleHost = new URL(tsReady.baseUrl).hostname;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(colors.red(`Error: ${message}`));
@@ -981,9 +1175,6 @@ async function runApp(
     console.error(colors.red(`Error: ${(err as Error).message}`));
     process.exit(1);
   }
-
-  // Validate the hostname before we try to auto-start the proxy.
-  parseHostname(name, tld);
 
   const ensureResult = await ensureProxyRunning(proxyPort, tls, desired);
 
@@ -1023,7 +1214,7 @@ async function runApp(
   if (desired.envTld !== DEFAULT_TLD && desired.envTld !== tld) {
     console.warn(
       chalk.yellow(
-        `Warning: PORTLESS_TLD=${desired.envTld} but the running proxy uses .${tld}. Using .${tld}.`
+        `Warning: PLESS_TLD=${desired.envTld} but the running proxy uses .${tld}. Using .${tld}.`
       )
     );
   }
@@ -1050,8 +1241,26 @@ async function runApp(
 
   // Register route (--force kills the existing owner if any)
   let killedPid: number | undefined;
+  const finalUrl = formatUrl(hostname, proxyPort, tls);
+  let gatewayUrl: string | undefined;
+  if (wantsTailscaleGateway && tsBaseUrl) {
+    gatewayUrl = await ensureTailscaleGateway(stateDir, tsBaseUrl);
+  }
   try {
-    killedPid = store.addRoute(hostname, port, process.pid, force);
+    killedPid = store.addRoute(
+      hostname,
+      port,
+      process.pid,
+      force,
+      wantsTailscaleGateway,
+      getRouteMetadata({
+        appName: name,
+        cwd: process.cwd(),
+        commandArgs,
+        localUrl: finalUrl,
+        gatewayUrl,
+      })
+    );
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -1063,8 +1272,12 @@ async function runApp(
     console.log(colors.yellow(`Killed existing process (PID ${killedPid})`));
   }
 
-  const finalUrl = formatUrl(hostname, proxyPort, tls);
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
+  if (gatewayUrl) {
+    console.log(chalk.green(`  Tailscale -> ${gatewayUrl}`));
+    console.log(chalk.gray(`  Select this app: ${gatewayUrl}/${encodeURIComponent(name)}/${port}`));
+    console.log(chalk.gray("  (accessible from your tailnet)\n"));
+  }
   if (lanIp) {
     console.log(chalk.green(`  LAN -> ${finalUrl}`));
     console.log(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
@@ -1075,7 +1288,7 @@ async function runApp(
   let tailscaleHttpsPort: number | undefined;
   let tailscaleUrl: string | undefined;
 
-  if (wantsTailscale && tsBaseUrl) {
+  if (wantsTailscaleDirect && tsBaseUrl) {
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const usedPorts = getUsedServePorts();
@@ -1108,11 +1321,16 @@ async function runApp(
     }
 
     try {
-      store.updateRoute(hostname, {
-        tailscaleUrl: tailscaleUrl,
-        tailscaleHttpsPort,
-        tailscaleFunnel: wantsFunnel || undefined,
-      });
+      store.updateRoute(
+        hostname,
+        {
+          tailscaleUrl: tailscaleUrl,
+          tailscaleHttpsPort,
+          tailscaleFunnel: wantsFunnel || undefined,
+        },
+        process.pid,
+        port
+      );
     } catch {
       // Non-fatal: route display metadata only
     }
@@ -1126,20 +1344,20 @@ async function runApp(
   const isExpoLan = isExpo && (lanMode || isLanEnvEnabled());
   const hostBind = isExpoLan ? undefined : "127.0.0.1";
 
-  // Ensure PORTLESS_LAN is propagated to child processes when the proxy
+  // Ensure PLESS_LAN is propagated to child processes when the proxy
   // was started with --lan separately and discovered from the state marker,
   // not from the env var.
-  if (lanMode && !process.env.PORTLESS_LAN) {
-    process.env.PORTLESS_LAN = "1";
+  if (lanMode && !getEnv("LAN")) {
+    setEnv("LAN", "1");
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
   injectFrameworkFlags(commandArgs, port);
 
-  // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
-  // Server Components) trust portless-proxied HTTPS services. Node.js does
+  // Point Node.js at the pless CA so server-side fetches (e.g. Next.js
+  // Server Components) trust pless-proxied HTTPS services. Node.js does
   // not use the system trust store, so without this env var it rejects the
-  // portless CA as "self-signed certificate in certificate chain".
+  // pless CA as "self-signed certificate in certificate chain".
   // Respect any value the user already set. Note: we check process.env here
   // rather than the constructed child env because the child env inherits from
   // process.env via spread. If a future code path injects NODE_EXTRA_CA_CERTS
@@ -1158,7 +1376,7 @@ async function runApp(
     : "";
   console.log(
     chalk.gray(
-      `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
+      `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
     )
   );
 
@@ -1167,13 +1385,19 @@ async function runApp(
       ...process.env,
       PORT: port.toString(),
       ...(hostBind ? { HOST: hostBind } : {}),
+      PLESS_URL: finalUrl,
       PORTLESS_URL: finalUrl,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: `.${tld}`,
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: [`.${tld}`, tailscaleHost].filter(Boolean).join(","),
       // Note: EXPO_PACKAGER_PROXY_URL is not used — expo-dev-client removed
       // baked-in pinging, making this env var ineffective. Expo handles its
       // own LAN discovery natively.
-      ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
-      ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
+      ...(lanMode ? { PLESS_LAN: "1", PORTLESS_LAN: "1" } : {}),
+      ...(gatewayUrl
+        ? { PLESS_TAILSCALE_URL: gatewayUrl, PORTLESS_TAILSCALE_URL: gatewayUrl }
+        : {}),
+      ...(tailscaleUrl
+        ? { PLESS_TAILSCALE_DIRECT_URL: tailscaleUrl, PORTLESS_TAILSCALE_URL: tailscaleUrl }
+        : {}),
       ...caEnv,
     },
     onCleanup: () => {
@@ -1186,7 +1410,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid, port);
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
@@ -1227,11 +1451,11 @@ function parseAppPort(value: string | undefined): number {
 }
 
 function appPortFromEnv(): number | undefined {
-  const envVal = process.env.PORTLESS_APP_PORT;
+  const envVal = getEnv("APP_PORT");
   if (!envVal) return undefined;
   const port = parseInt(envVal, 10);
   if (isNaN(port) || port < 1 || port > 65535) {
-    console.error(colors.red(`Error: Invalid PORTLESS_APP_PORT="${envVal}". Must be 1-65535.`));
+    console.error(colors.red(`Error: Invalid PLESS_APP_PORT="${envVal}". Must be 1-65535.`));
     process.exit(1);
   }
   return port;
@@ -1239,12 +1463,20 @@ function appPortFromEnv(): number | undefined {
 
 function applyTailscaleFlag(flag: string): boolean {
   if (flag === "--tailscale") {
-    process.env.PORTLESS_TAILSCALE = "1";
+    setEnv("TAILSCALE", "1");
+    return true;
+  }
+  if (flag === "--no-tailscale") {
+    setEnv("TAILSCALE", "0");
+    return true;
+  }
+  if (flag === "--tailscale-direct") {
+    setEnv("TAILSCALE_DIRECT", "1");
     return true;
   }
   if (flag === "--funnel") {
-    process.env.PORTLESS_FUNNEL = "1";
-    process.env.PORTLESS_TAILSCALE = "1";
+    setEnv("FUNNEL", "1");
+    setEnv("TAILSCALE_DIRECT", "1");
     return true;
   }
   return false;
@@ -1269,10 +1501,10 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       break;
     } else if (args[i] === "--help" || args[i] === "-h") {
       console.log(`
-${colors.bold("portless run")} - Infer project name and run through the proxy.
+${colors.bold("pless run")} - Infer project name and run through the proxy.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless run [options] [command...]")}
+  ${colors.cyan("pless run [options] [command...]")}
 
   When no command is given, runs the configured script (default: "dev")
   from package.json.
@@ -1284,7 +1516,7 @@ ${colors.bold("Options:")}
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
-  1. portless.json "name" field
+  1. pless.json "name" field
   2. package.json "name" field (walks up directories)
   3. Git repo root directory name
   4. Current directory basename
@@ -1294,11 +1526,11 @@ ${colors.bold("Name inference (in order):")}
   (e.g. feature-auth.myapp.localhost).
 
 ${colors.bold("Examples:")}
-  portless run                        # Run dev script through proxy
-  portless run next dev               # -> https://<project>.localhost
-  portless run --name myapp next dev  # -> https://myapp.localhost
-  portless run vite dev               # -> https://<project>.localhost
-  portless run --app-port 3000 pnpm start
+  pless run                        # Run dev script through proxy
+  pless run next dev               # -> https://<project>.localhost
+  pless run --name myapp next dev  # -> https://myapp.localhost
+  pless run vite dev               # -> https://<project>.localhost
+  pless run --app-port 3000 pnpm start
 `);
       process.exit(0);
     } else if (args[i] === "--force") {
@@ -1310,7 +1542,7 @@ ${colors.bold("Examples:")}
       i++;
       if (!args[i] || args[i].startsWith("-")) {
         console.error(colors.red("Error: --name requires a name value."));
-        console.error(colors.cyan("  portless run --name <name> <command...>"));
+        console.error(colors.cyan("  pless run --name <name> <command...>"));
         process.exit(1);
       }
       name = args[i];
@@ -1319,7 +1551,9 @@ ${colors.bold("Examples:")}
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --name, --force, --app-port, --tailscale, --funnel, --help")
+        colors.blue(
+          "Known flags: --name, --force, --app-port, --tailscale, --no-tailscale, --tailscale-direct, --funnel, --help"
+        )
       );
       process.exit(1);
     }
@@ -1357,7 +1591,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --no-tailscale, --tailscale-direct, --funnel"
+        )
+      );
       process.exit(1);
     }
     i++;
@@ -1367,7 +1605,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   const name = args[i];
   i++;
 
-  // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
+  // Allow flags immediately after name (e.g. `pless myapp --force next dev`)
   while (i < args.length && args[i].startsWith("--")) {
     if (args[i] === "--") {
       i++;
@@ -1381,7 +1619,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --no-tailscale, --tailscale-direct, --funnel"
+        )
+      );
       process.exit(1);
     }
     i++;
@@ -1398,47 +1640,49 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
 function printHelp(): void {
   console.log(`
-${colors.bold("portless")} - Replace port numbers with stable, named .localhost URLs. For humans and agents.
+${colors.bold("pless")} - Replace port numbers with stable, named .localhost URLs. For humans and agents.
 
 Eliminates port conflicts, memorizing port numbers, and cookie/storage
 clashes by giving each dev server a stable .localhost URL.
 
 ${colors.bold("Install:")}
-  ${colors.cyan("npm install -g portless")}          Global (recommended)
-  ${colors.cyan("npm install -D portless")}          Project dev dependency
+  ${colors.cyan("npm install -g pless")}          Global (recommended)
+  ${colors.cyan("npm install -D pless")}          Project dev dependency
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless")}                         Run dev script through proxy
-  ${colors.cyan("portless")}                         From monorepo root: run all workspace packages
-  ${colors.cyan("portless run")}                     Same as above
-  ${colors.cyan("portless run <cmd>")}               Run a command through the proxy
-  ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
-  ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon)
-  ${colors.cyan("portless proxy stop")}              Stop the proxy
-  ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
-  ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
-  ${colors.cyan("portless alias --remove <name>")}   Remove a static route
-  ${colors.cyan("portless list")}                    Show active routes
-  ${colors.cyan("portless trust")}                   Add local CA to system trust store
-  ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
-  ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
-  ${colors.cyan("portless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
-  ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
+  ${colors.cyan("pless")}                         Run dev script through proxy
+  ${colors.cyan("pless")}                         From monorepo root: run all workspace packages
+  ${colors.cyan("pless run")}                     Same as above
+  ${colors.cyan("pless run <cmd>")}               Run a command through the proxy
+  ${colors.cyan("pless <name> <cmd>")}            Run with an explicit app name
+  ${colors.cyan("pless proxy start")}             Start the proxy (HTTPS on port 443, daemon)
+  ${colors.cyan("pless proxy stop")}              Stop the proxy
+  ${colors.cyan("pless get <name>")}              Print URL for a service (for cross-service refs)
+  ${colors.cyan("pless alias <name> <port>")}     Register a static route (e.g. for Docker)
+  ${colors.cyan("pless alias --remove <name>")}   Remove a static route
+  ${colors.cyan("pless list")}                    Show active routes
+  ${colors.cyan("pless trust")}                   Add local CA to system trust store
+  ${colors.cyan("pless clean")}                   Remove pless state, trust entry, and hosts block
+  ${colors.cyan("pless prune")}                   Kill orphaned dev servers from crashed sessions
+  ${colors.cyan("pless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
+  ${colors.cyan("pless hosts clean")}             Remove pless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Examples:")}
-  portless                            # Run dev script through proxy
-  portless                            # From monorepo root: start all apps
-  portless --script start             # Run "start" script instead of "dev"
-  portless myapp next dev             # -> https://myapp.localhost
-  portless run next dev               # -> https://<project>.localhost
-  portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
-  portless get backend                # -> https://backend.localhost
-  portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
-  portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
+  pless                            # Run dev script through proxy
+  pless                            # From monorepo root: start all apps
+  pless --script start             # Run "start" script instead of "dev"
+  pless myapp next dev             # -> https://myapp.localhost
+  pless run next dev               # -> https://<project>.localhost
+  pless run next dev               # in worktree -> https://<worktree>.<project>.localhost
+  pless get backend                # -> https://backend.localhost
+  pless myapp next dev             # -> also https://<node>.ts.net/myapp/<port>
+  pless --no-tailscale myapp next dev
+  pless --tailscale-direct myapp next dev
+  pless myapp --funnel next dev    # -> public Tailscale Funnel URL
 
-${colors.bold("Configuration (portless.json):")}
-  Optional. Portless works out of the box by running the "dev" script
-  from package.json. Use portless.json to override defaults.
+${colors.bold("Configuration (pless.json):")}
+  Optional. pless works out of the box by running the "dev" script
+  from package.json. Use pless.json to override defaults.
 
   Override name:   { "name": "myapp" }
   Override script: { "name": "myapp", "script": "start" }
@@ -1450,9 +1694,9 @@ ${colors.bold("In package.json:")}
       "dev": "next dev"
     }
   }
-  Then run: portless
-  Or:       portless run
-  Or:       portless run next dev
+  Then run: pless
+  Or:       pless run
+  Or:       pless run next dev
 
 ${colors.bold("How it works:")}
   1. Start the proxy once (HTTPS on port 443 by default, auto-elevates with sudo)
@@ -1466,7 +1710,7 @@ ${colors.bold("How it works:")}
 
 ${colors.bold("HTTP/2 + HTTPS (default):")}
   HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
-  On first use, portless generates a local CA and adds it to your
+  On first use, pless generates a local CA and adds it to your
   system trust store. No browser warnings. Disable with --no-tls.
 
 ${colors.bold("LAN mode:")}
@@ -1478,21 +1722,24 @@ ${colors.bold("LAN mode:")}
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   All proxy settings are persisted and reused on auto-start unless
   overridden by explicit flags or env vars.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+  Use PLESS_LAN=0 for one start to switch back to .localhost mode.
   If a proxy is already running with different explicit LAN/TLS/TLD settings,
   stop it first.
-  ${colors.cyan("portless proxy start --lan")}
-  ${colors.cyan("portless proxy start --lan --https")}
-  ${colors.cyan("portless proxy start --lan --ip 192.168.1.42")}
+  ${colors.cyan("pless proxy start --lan")}
+  ${colors.cyan("pless proxy start --lan --https")}
+  ${colors.cyan("pless proxy start --lan --ip 192.168.1.42")}
 
 ${colors.bold("Tailscale sharing:")}
-  Use --tailscale to share your dev server with teammates on your tailnet.
-  Each app is root-mounted on its own Tailscale HTTPS port (443, then 8443,
-  8444, etc.) so no basePath configuration is needed.
-  Use --funnel to expose your dev server to the public internet via
-  Tailscale Funnel. Requires Tailscale CLI to be installed and connected.
-  ${colors.cyan("portless myapp --tailscale next dev")}
-  ${colors.cyan("portless myapp --funnel next dev")}
+  Tailscale gateway mode is enabled by default. pless starts one local
+  gateway, publishes it through Tailscale Serve, and shows running apps at
+  https://<node>.ts.net/. Use /<app>/<port> to select an instance; after
+  selection, / proxies that app at the root path.
+  Use --no-tailscale to run local-only. Use --tailscale-direct for the
+  upstream-style one-app-per-Tailscale-port behavior. Use --funnel to expose
+  your dev server publicly via Tailscale Funnel.
+  ${colors.cyan("pless myapp next dev")}
+  ${colors.cyan("pless --tailscale-direct myapp next dev")}
+  ${colors.cyan("pless myapp --funnel next dev")}
 
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
@@ -1510,49 +1757,54 @@ ${colors.bold("Options:")}
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
-  --tailscale                   Share the app on your Tailscale network (tailnet)
+  --tailscale                   Enable Tailscale gateway mode (default)
+  --no-tailscale                Disable Tailscale gateway mode for this run
+  --tailscale-direct            Share the app on its own Tailscale Serve port
   --funnel                      Share the app publicly via Tailscale Funnel
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
 
 ${colors.bold("Environment variables:")}
-  PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
-  PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
-  PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
-  PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
-  PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
-  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
-  PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
-  PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
-  PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
-  PORTLESS_STATE_DIR=<path>     Override the state directory
-  PORTLESS=0                    Run command directly without proxy
+  PLESS_PORT=<number>           Override the default proxy port (e.g. in .bashrc)
+  PLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
+  PLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
+  PLESS_LAN=1                   Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
+  PLESS_TLD=<tld>               Use a custom TLD (e.g. test, dev; default: localhost)
+  PLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
+  PLESS_SYNC_HOSTS=0            Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
+  PLESS_TAILSCALE=0             Disable Tailscale gateway mode by default
+  PLESS_TAILSCALE_DIRECT=1      Use one Tailscale Serve port per app
+  PLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel
+  PLESS_STATE_DIR=<path>        Override the state directory
+  PLESS=0                       Run command directly without proxy
+  PORTLESS_*                    Still accepted for upstream compatibility
 
 ${colors.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on
   HOST                          Usually 127.0.0.1 (omitted for Expo in LAN mode)
-  PORTLESS_URL                  Public URL of the app (e.g. https://myapp.localhost)
-  PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
-  PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
-  NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
+  PLESS_URL                     Public URL of the app (e.g. https://myapp.localhost)
+  PLESS_LAN                     Set to 1 when proxy is in LAN mode
+  PLESS_TAILSCALE_URL           Tailscale gateway URL when enabled
+  PORTLESS_*                    Compatibility aliases for existing scripts
+  NODE_EXTRA_CA_CERTS           Path to the pless CA (set when HTTPS is active)
 
 ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
   Safari relies on the system DNS resolver, which may not handle them.
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
-  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. To manually sync:
-    ${colors.cyan("portless hosts sync")}
+  custom TLDs, and LAN .local). Set PLESS_SYNC_HOSTS=0 to disable. To manually sync:
+    ${colors.cyan("pless hosts sync")}
   Clean up later with:
-    ${colors.cyan("portless hosts clean")}
+    ${colors.cyan("pless hosts clean")}
 
-${colors.bold("Skip portless:")}
-  PORTLESS=0 pnpm dev           # Runs command directly without proxy
+${colors.bold("Skip pless:")}
+  PLESS=0 pnpm dev              # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
   run, get, alias, hosts, list, trust, clean, prune, proxy are subcommands and
-  cannot be used as app names directly. Use "portless run" to infer the name,
-  or "portless --name <name>" to force any name including reserved ones.
+  cannot be used as app names directly. Use "pless run" to infer the name,
+  or "pless --name <name>" to force any name including reserved ones.
 `);
   process.exit(0);
 }
@@ -1574,7 +1826,7 @@ async function handleTrust(): Promise<void> {
   const result = trustCA(dir);
   if (result.trusted) {
     console.log(colors.green("Local CA added to system trust store."));
-    console.log(colors.gray("Browsers will now trust portless HTTPS certificates."));
+    console.log(colors.gray("Browsers will now trust pless HTTPS certificates."));
     return;
   }
 
@@ -1589,6 +1841,7 @@ async function handleTrust(): Promise<void> {
       [
         "env",
         ...collectPortlessEnvArgs(),
+        `PLESS_STATE_DIR=${dir}`,
         `PORTLESS_STATE_DIR=${dir}`,
         process.execPath,
         getEntryScript(),
@@ -1610,12 +1863,12 @@ async function handleTrust(): Promise<void> {
 async function handleClean(args: string[]): Promise<void> {
   if (args[1] === "--help" || args[1] === "-h") {
     console.log(`
-${colors.bold("portless clean")} - Remove portless artifacts from this machine.
+${colors.bold("pless clean")} - Remove pless artifacts from this machine.
 
 Stops the proxy if it is running, removes the local CA from the OS trust store
-when it was installed by portless, deletes known files under state directories
-(~/.portless, the system state directory, and PORTLESS_STATE_DIR when set),
-and removes the portless block from ${HOSTS_DISPLAY}.
+when it was installed by pless, deletes known files under state directories
+(~/.pless, the system state directory, and PLESS_STATE_DIR / PORTLESS_STATE_DIR when set),
+and removes the pless block from ${HOSTS_DISPLAY}.
 
 Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed.
@@ -1624,7 +1877,7 @@ macOS/Linux may prompt for sudo when the proxy, trust store, or ${HOSTS_DISPLAY}
 require elevated privileges. On Windows, run as Administrator if needed.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless clean")}
+  ${colors.cyan("pless clean")}
 
 ${colors.bold("Options:")}
   --help, -h             Show this help
@@ -1634,7 +1887,7 @@ ${colors.bold("Options:")}
 
   if (args.length > 1) {
     console.error(colors.red(`Error: Unknown argument "${args[1]}".`));
-    console.error(colors.cyan("  portless clean --help"));
+    console.error(colors.cyan("  pless clean --help"));
     process.exit(1);
   }
 
@@ -1644,6 +1897,7 @@ ${colors.bold("Options:")}
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
   await stopProxy(store, port, tls);
+  stopGateway(dir);
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
   const routesForClean = store.loadRoutesRaw();
@@ -1671,7 +1925,7 @@ ${colors.bold("Options:")}
       console.warn(
         colors.yellow(
           `Could not remove CA from trust store: ${untrustResult.error}\n` +
-            `Try: sudo portless clean (Linux), or delete the certificate manually.`
+            `Try: sudo pless clean (Linux), or delete the certificate manually.`
         )
       );
     }
@@ -1680,10 +1934,10 @@ ${colors.bold("Options:")}
   for (const stateDir of stateDirs) {
     removePortlessStateFiles(stateDir);
   }
-  console.log(colors.green("Removed portless state files from known state directories."));
+  console.log(colors.green("Removed pless state files from known state directories."));
 
   if (cleanHostsFile()) {
-    console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
+    console.log(colors.green(`Removed pless entries from ${HOSTS_DISPLAY}.`));
   } else if (!isWindows && process.getuid?.() !== 0) {
     console.log(
       colors.yellow(`Updating ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`)
@@ -1697,13 +1951,13 @@ ${colors.bold("Options:")}
       }
     );
     if (result.status !== 0) {
-      console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless clean`));
+      console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo pless clean`));
       process.exit(1);
     }
   } else {
     console.warn(
       colors.yellow(
-        `Could not remove portless entries from ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`
+        `Could not remove pless entries from ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`
       )
     );
   }
@@ -1714,16 +1968,16 @@ ${colors.bold("Options:")}
 async function handlePrune(args: string[]): Promise<void> {
   if (args[1] === "--help" || args[1] === "-h") {
     console.log(`
-${colors.bold("portless prune")} - Kill orphaned dev servers left behind by crashed portless sessions.
+${colors.bold("pless prune")} - Kill orphaned dev servers left behind by crashed pless sessions.
 
-When portless is killed with SIGKILL (kill -9) or crashes, child dev servers
+When pless is killed with SIGKILL (kill -9) or crashes, child dev servers
 may survive and continue holding their ports. This command finds those orphans
 by checking routes whose owning CLI process is dead but whose port is still in
 use, then terminates them and cleans up the stale route entries.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless prune")}
-  ${colors.cyan("portless prune --force")}     Send SIGKILL instead of SIGTERM
+  ${colors.cyan("pless prune")}
+  ${colors.cyan("pless prune --force")}     Send SIGKILL instead of SIGTERM
 
 ${colors.bold("Options:")}
   --force                Send SIGKILL instead of SIGTERM
@@ -1797,25 +2051,25 @@ async function handleList(): Promise<void> {
 async function handleGet(args: string[]): Promise<void> {
   if (args[1] === "--help" || args[1] === "-h") {
     console.log(`
-${colors.bold("portless get")} - Print the URL for a service.
+${colors.bold("pless get")} - Print the URL for a service.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless get <name>")}
+  ${colors.cyan("pless get <name>")}
 
 Constructs the URL using the same hostname and worktree logic as
-"portless run", then prints it to stdout. Useful for wiring services
+"pless run", then prints it to stdout. Useful for wiring services
 together:
 
-  BACKEND_URL=$(portless get backend)
+  BACKEND_URL=$(pless get backend)
 
 ${colors.bold("Options:")}
   --no-worktree          Skip worktree prefix detection
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
-  portless get backend                  # -> https://backend.localhost
-  portless get backend                  # in worktree -> https://auth.backend.localhost
-  portless get backend --no-worktree    # -> https://backend.localhost (skip worktree)
+  pless get backend                  # -> https://backend.localhost
+  pless get backend                  # in worktree -> https://auth.backend.localhost
+  pless get backend --no-worktree    # -> https://backend.localhost (skip worktree)
 `);
     process.exit(0);
   }
@@ -1838,9 +2092,9 @@ ${colors.bold("Examples:")}
   if (positional.length === 0) {
     console.error(colors.red("Error: Missing service name."));
     console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless get <name>"));
+    console.error(colors.cyan("  pless get <name>"));
     console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless get backend"));
+    console.error(colors.cyan("  pless get backend"));
     process.exit(1);
   }
 
@@ -1851,24 +2105,24 @@ ${colors.bold("Examples:")}
   const { port, tls, tld } = await discoverState();
   const hostname = parseHostname(effectiveName, tld);
   const url = formatUrl(hostname, port, tls);
-  // Print bare URL to stdout so it works in $(portless get <name>)
+  // Print bare URL to stdout so it works in $(pless get <name>)
   process.stdout.write(url + "\n");
 }
 
 async function handleAlias(args: string[]): Promise<void> {
   if (args[1] === "--help" || args[1] === "-h") {
     console.log(`
-${colors.bold("portless alias")} - Register a static route for services not managed by portless.
+${colors.bold("pless alias")} - Register a static route for services not managed by pless.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless alias <name> <port>")}        Register a route
-  ${colors.cyan("portless alias --remove <name>")}      Remove a route
-  ${colors.cyan("portless alias <name> <port> --force")} Override existing route
+  ${colors.cyan("pless alias <name> <port>")}        Register a route
+  ${colors.cyan("pless alias --remove <name>")}      Remove a route
+  ${colors.cyan("pless alias <name> <port> --force")} Override existing route
 
 ${colors.bold("Examples:")}
-  portless alias my-postgres 5432     # -> https://my-postgres.localhost
-  portless alias redis 6379           # -> https://redis.localhost
-  portless alias --remove my-postgres # Remove the alias
+  pless alias my-postgres 5432     # -> https://my-postgres.localhost
+  pless alias redis 6379           # -> https://redis.localhost
+  pless alias --remove my-postgres # Remove the alias
 `);
     process.exit(0);
   }
@@ -1882,7 +2136,7 @@ ${colors.bold("Examples:")}
     const aliasName = args[2];
     if (!aliasName) {
       console.error(colors.red("Error: No alias name provided."));
-      console.error(colors.cyan("  portless alias --remove <name>"));
+      console.error(colors.cyan("  pless alias --remove <name>"));
       process.exit(1);
     }
     const hostname = parseHostname(aliasName, tld);
@@ -1902,10 +2156,10 @@ ${colors.bold("Examples:")}
   if (!aliasName || !aliasPort) {
     console.error(colors.red("Error: Missing arguments."));
     console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless alias <name> <port>"));
-    console.error(colors.cyan("  portless alias --remove <name>"));
+    console.error(colors.cyan("  pless alias <name> <port>"));
+    console.error(colors.cyan("  pless alias --remove <name>"));
     console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless alias my-postgres 5432"));
+    console.error(colors.cyan("  pless alias my-postgres 5432"));
     process.exit(1);
   }
 
@@ -1924,25 +2178,25 @@ ${colors.bold("Examples:")}
 async function handleHosts(args: string[]): Promise<void> {
   if (args[1] === "--help" || args[1] === "-h") {
     console.log(`
-${colors.bold("portless hosts")} - Manage ${HOSTS_DISPLAY} entries for .localhost subdomains.
+${colors.bold("pless hosts")} - Manage ${HOSTS_DISPLAY} entries for .localhost subdomains.
 
 Safari relies on the system DNS resolver, which may not handle .localhost
 subdomains. This command adds entries to ${HOSTS_DISPLAY} as a workaround.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
-  ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
+  ${colors.cyan("pless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${colors.cyan("pless hosts clean")}   Remove pless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Auto-sync:")}
   The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
-  PORTLESS_SYNC_HOSTS=0.
+  PLESS_SYNC_HOSTS=0.
 `);
     process.exit(0);
   }
 
   if (args[1] === "clean") {
     if (cleanHostsFile()) {
-      console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
+      console.log(colors.green(`Removed pless entries from ${HOSTS_DISPLAY}.`));
       return;
     }
 
@@ -1972,10 +2226,10 @@ ${colors.bold("Auto-sync:")}
 
   if (!args[1]) {
     console.log(`
-${colors.bold("Usage: portless hosts <command>")}
+${colors.bold("Usage: pless hosts <command>")}
 
-  ${colors.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
-  ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
+  ${colors.cyan("pless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${colors.cyan("pless hosts clean")}   Remove pless entries from ${HOSTS_DISPLAY}
 `);
     process.exit(0);
   }
@@ -1983,8 +2237,8 @@ ${colors.bold("Usage: portless hosts <command>")}
   if (args[1] !== "sync") {
     console.error(colors.red(`Error: Unknown hosts subcommand "${args[1]}".`));
     console.error(colors.blue("Usage:"));
-    console.error(colors.cyan(`  portless hosts sync    # Add routes to ${HOSTS_DISPLAY}`));
-    console.error(colors.cyan("  portless hosts clean   # Remove portless entries"));
+    console.error(colors.cyan(`  pless hosts sync    # Add routes to ${HOSTS_DISPLAY}`));
+    console.error(colors.cyan("  pless hosts clean   # Remove pless entries"));
     process.exit(1);
   }
 
@@ -2061,17 +2315,17 @@ async function handleProxy(args: string[]): Promise<void> {
   const isProxyHelp = args[1] === "--help" || args[1] === "-h";
   if (isProxyHelp || args[1] !== "start") {
     console.log(`
-${colors.bold("portless proxy")} - Manage the portless proxy server.
+${colors.bold("pless proxy")} - Manage the pless proxy server.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless proxy start")}                Start the HTTPS proxy on port 443 (daemon)
-  ${colors.cyan("portless proxy start --no-tls")}       Start without HTTPS (port 80)
-  ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
-  ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
-  ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
-  ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
-  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
-  ${colors.cyan("portless proxy stop")}                 Stop the proxy
+  ${colors.cyan("pless proxy start")}                Start the HTTPS proxy on port 443 (daemon)
+  ${colors.cyan("pless proxy start --no-tls")}       Start without HTTPS (port 80)
+  ${colors.cyan("pless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
+  ${colors.cyan("pless proxy start --foreground")}   Start in foreground (for debugging)
+  ${colors.cyan("pless proxy start -p 1355")}        Start on a custom port (no sudo)
+  ${colors.cyan("pless proxy start --tld test")}     Use .test instead of .localhost
+  ${colors.cyan("pless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("pless proxy stop")}                 Stop the proxy
 
 ${colors.bold("LAN mode (--lan):")}
   Makes services accessible from other devices on the same WiFi network
@@ -2079,7 +2333,7 @@ ${colors.bold("LAN mode (--lan):")}
   Auto-detects your LAN IP and follows changes automatically, or use
   --ip to pin one.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+  Use PLESS_LAN=0 for one start to switch back to .localhost mode.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
@@ -2087,7 +2341,7 @@ ${colors.bold("LAN mode (--lan):")}
   const isForeground = args.includes("--foreground");
   const skipTrust = args.includes("--skip-trust");
 
-  // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
+  // HTTPS is on by default. Disable with --no-tls or PLESS_HTTPS=0.
   const hasHttpsFlag = args.includes("--https");
   const hasNoTls = args.includes("--no-tls") || isHttpsEnvDisabled();
   const wantHttps = !hasNoTls;
@@ -2130,7 +2384,7 @@ ${colors.bold("LAN mode (--lan):")}
     if (!portValue || portValue.startsWith("-")) {
       console.error(colors.red("Error: --port / -p requires a port number."));
       console.error(colors.blue("Usage:"));
-      console.error(colors.cyan("  portless proxy start -p 8080"));
+      console.error(colors.cyan("  pless proxy start -p 8080"));
       process.exit(1);
     }
     proxyPort = parseInt(portValue, 10);
@@ -2173,12 +2427,12 @@ ${colors.bold("LAN mode (--lan):")}
       hasNoTls ||
       customCertPath !== null ||
       customKeyPath !== null ||
-      process.env.PORTLESS_HTTPS !== undefined,
+      hasEnv("HTTPS"),
     customCert: customCertPath !== null || customKeyPath !== null,
-    lanMode: process.env.PORTLESS_LAN !== undefined,
-    lanIp: process.env.PORTLESS_LAN_IP !== undefined,
-    tld: tldIdx !== -1 || process.env.PORTLESS_TLD !== undefined,
-    useWildcard: args.includes("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
+    lanMode: hasEnv("LAN"),
+    lanIp: hasEnv("LAN_IP"),
+    tld: tldIdx !== -1 || hasEnv("TLD"),
+    useWildcard: args.includes("--wildcard") || hasEnv("WILDCARD"),
   };
 
   // Resolve state directory based on the port
@@ -2190,7 +2444,7 @@ ${colors.bold("LAN mode (--lan):")}
     persistedLanMode = currentState.lanMode;
     if (
       (await isProxyRunning(currentState.port)) ||
-      (!!process.env.PORTLESS_STATE_DIR && (await isPortListening(currentState.port)))
+      (hasEnv("STATE_DIR") && (await isPortListening(currentState.port)))
     ) {
       runningPort = currentState.port;
       proxyPort = currentState.port;
@@ -2205,7 +2459,7 @@ ${colors.bold("LAN mode (--lan):")}
     customCertPath,
     customKeyPath,
     lanMode: isLanEnvEnabled(),
-    lanIp: process.env.PORTLESS_LAN_IP || null,
+    lanIp: getEnv("LAN_IP") || null,
     tld,
     useWildcard,
   });
@@ -2238,8 +2492,7 @@ ${colors.bold("LAN mode (--lan):")}
     console.warn(colors.yellow(`Warning: .${tld}: ${riskyReason}`));
   }
 
-  const syncDisabled =
-    process.env.PORTLESS_SYNC_HOSTS === "0" || process.env.PORTLESS_SYNC_HOSTS === "false";
+  const syncDisabled = isEnvDisabled("SYNC_HOSTS");
   if (tld !== DEFAULT_TLD && !lanMode && syncDisabled) {
     console.warn(
       colors.yellow(
@@ -2247,7 +2500,7 @@ ${colors.bold("LAN mode (--lan):")}
       )
     );
     console.warn(colors.yellow("Hosts sync is disabled. To add entries manually, run:"));
-    console.warn(colors.cyan("  portless hosts sync"));
+    console.warn(colors.cyan("  pless hosts sync"));
   }
 
   let store = new RouteStore(stateDir, {
@@ -2269,7 +2522,7 @@ ${colors.bold("LAN mode (--lan):")}
     const portFlag = proxyPort !== getDefaultPort(useHttps) ? ` -p ${proxyPort}` : "";
     console.log(colors.yellow(`Proxy is already running on port ${proxyPort}.`));
     console.log(
-      colors.blue(`To restart: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
+      colors.blue(`To restart: pless proxy stop${portFlag} && pless proxy start${portFlag}`)
     );
     return;
   }
@@ -2301,7 +2554,7 @@ ${colors.bold("LAN mode (--lan):")}
     if (!lanIp) {
       console.error(colors.red("Error: Could not detect LAN IP. Are you connected to a network?"));
       console.error(colors.blue("Specify manually:"));
-      console.error(colors.cyan("  portless proxy start --lan --ip 192.168.1.42"));
+      console.error(colors.cyan("  pless proxy start --lan --ip 192.168.1.42"));
       process.exit(1);
     }
   } else {
@@ -2401,7 +2654,7 @@ ${colors.bold("LAN mode (--lan):")}
       console.error(
         colors.red(`Error: Port ${proxyPort} requires elevated privileges and sudo failed.`)
       );
-      console.error(colors.blue("Try again (portless will prompt for sudo):"));
+      console.error(colors.blue("Try again (pless will prompt for sudo):"));
       console.error(colors.cyan(`  ${currentCommand}`));
       process.exit(1);
     }
@@ -2449,7 +2702,7 @@ ${colors.bold("LAN mode (--lan):")}
         const trustResult = trustCA(stateDir);
         if (trustResult.trusted) {
           console.log(
-            colors.green("CA added to system trust store. Browsers will trust portless certs.")
+            colors.green("CA added to system trust store. Browsers will trust pless certs.")
           );
         } else {
           console.warn(colors.yellow("Could not add CA to system trust store."));
@@ -2459,7 +2712,7 @@ ${colors.bold("LAN mode (--lan):")}
           console.warn(
             colors.yellow("Browsers will show certificate warnings. To fix this later, run:")
           );
-          console.warn(colors.cyan("  portless trust"));
+          console.warn(colors.cyan("  pless trust"));
         }
       }
 
@@ -2477,7 +2730,7 @@ ${colors.bold("LAN mode (--lan):")}
 
   // Foreground mode: run the proxy directly in this process
   if (isForeground) {
-    console.log(chalk.blue.bold("\nportless proxy\n"));
+    console.log(chalk.blue.bold("\npless proxy\n"));
     startProxyServer(store, proxyPort, tld, tlsOptions, lanIp, desiredWildcard ? false : undefined);
     return;
   }
@@ -2529,7 +2782,7 @@ ${colors.bold("LAN mode (--lan):")}
   if (!(await waitForProxy(proxyPort, undefined, undefined, useHttps))) {
     console.error(colors.red("Proxy failed to start (timed out waiting for it to listen)."));
     console.error(colors.blue("Try starting the proxy in the foreground to see the error:"));
-    console.error(colors.cyan("  portless proxy start --foreground"));
+    console.error(colors.cyan("  pless proxy start --foreground"));
     if (fs.existsSync(logPath)) {
       console.error(colors.gray(`Logs: ${logPath}`));
     }
@@ -2544,8 +2797,75 @@ ${colors.bold("LAN mode (--lan):")}
   }
 }
 
+async function handleGateway(args: string[]): Promise<void> {
+  if (args[1] !== "start") {
+    console.error(colors.red(`Error: Unknown gateway subcommand "${args[1] ?? ""}".`));
+    process.exit(1);
+  }
+
+  const foreground = args.includes("--foreground");
+  const portIdx = args.indexOf("--port");
+  const portValue = portIdx !== -1 ? args[portIdx + 1] : undefined;
+  if (!portValue || portValue.startsWith("-")) {
+    console.error(colors.red("Error: gateway start requires --port <number>."));
+    process.exit(1);
+  }
+  const gatewayPort = parseInt(portValue, 10);
+  if (isNaN(gatewayPort) || gatewayPort < 1 || gatewayPort > 65535) {
+    console.error(colors.red(`Error: Invalid gateway port "${portValue}".`));
+    process.exit(1);
+  }
+
+  const stateDir = resolveStateDir();
+  const store = new RouteStore(stateDir, {
+    onWarning: (msg: string) => console.warn(colors.yellow(msg)),
+  });
+  store.ensureDir();
+
+  const server = createGatewayServer({
+    store,
+    onError: (msg) => console.error(colors.red(msg)),
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(colors.red(`Gateway port ${gatewayPort} is already in use.`));
+    } else {
+      console.error(colors.red(`Gateway error: ${err.message}`));
+    }
+    process.exit(1);
+  });
+
+  server.listen(gatewayPort, "127.0.0.1", () => {
+    fs.writeFileSync(gatewayPidPath(stateDir), process.pid.toString(), { mode: FILE_MODE });
+    fs.writeFileSync(gatewayPortPath(stateDir), gatewayPort.toString(), { mode: FILE_MODE });
+    fixOwnership(stateDir, gatewayPidPath(stateDir), gatewayPortPath(stateDir));
+    if (foreground) {
+      console.log(colors.green(`Tailscale gateway listening on 127.0.0.1:${gatewayPort}`));
+    }
+  });
+
+  const cleanup = () => {
+    try {
+      fs.unlinkSync(gatewayPidPath(stateDir));
+    } catch {
+      // Already absent.
+    }
+    try {
+      fs.unlinkSync(gatewayPortPath(stateDir));
+    } catch {
+      // Already absent.
+    }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), EXIT_TIMEOUT_MS).unref();
+  };
+
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+}
+
 /**
- * Load the effective AppConfig for the current directory from portless.json.
+ * Load the effective AppConfig for the current directory from pless.json.
  * Handles both single-app (top-level fields) and monorepo (apps map) configs.
  */
 function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
@@ -2563,13 +2883,13 @@ function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
 }
 
 /**
- * Zero-arg dispatch: `portless` with no arguments.
+ * Zero-arg dispatch: `pless` with no arguments.
  * Returns true if handled, false to fall through to help text.
  *
  * Activates when:
  * - At a workspace root (pnpm, npm, yarn, or bun) -> multi-app mode
  * - In any directory with a package.json that has the target script -> single-app mode
- * Config (portless.json / package.json "portless" key) is loaded for overrides
+ * Config (pless.json / package.json "pless" key) is loaded for overrides
  * but is not required.
  */
 async function handleDefaultMode(
@@ -2633,7 +2953,7 @@ async function handleDefaultSingle(
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = "pless.json";
   } else {
     const inferred = inferProjectName(cwd);
     baseName = inferred.name;
@@ -2725,13 +3045,14 @@ async function spawnProxiedApp(
   proxyPort: number,
   tls: boolean,
   tld: string,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<string, number | null>,
+  gatewayUrl?: string
 ): Promise<{
   child: ReturnType<typeof spawn>;
   displayUrl: string;
-  route: { store: RouteStore; hostname: string } | null;
+  route: { store: RouteStore; hostname: string; port: number } | null;
 }> {
-  const usesPortless = app.commandArgs[0] === "portless";
+  const usesPortless = app.commandArgs[0] === CLI_NAME || app.commandArgs[0] === LEGACY_CLI_NAME;
 
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
@@ -2739,17 +3060,18 @@ async function spawnProxiedApp(
   let env: Record<string, string | undefined>;
   let store: RouteStore | null = null;
   let hostname: string | null = null;
+  let appPort: number | null = null;
   let displayUrl: string;
 
   if (usesPortless) {
     env = pkgEnv;
-    displayUrl = "(managed by portless)";
+    displayUrl = `managed by ${commandName()}`;
   } else {
     store = new RouteStore(stateDir, {
       onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
     });
 
-    const appPort = app.appPort ?? (await findFreePort());
+    appPort = app.appPort ?? (await findFreePort());
     const protocol = tls ? "https" : "http";
     const portSuffix =
       (tls && proxyPort === 443) || (!tls && proxyPort === 80) ? "" : `:${proxyPort}`;
@@ -2757,13 +3079,30 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     hostname = parseHostname(app.name, tld);
-    store.addRoute(hostname, appPort, process.pid);
+    store.addRoute(
+      hostname,
+      appPort,
+      process.pid,
+      false,
+      wantsGatewayTailscale(),
+      getRouteMetadata({
+        appName: app.name,
+        cwd: app.pkg.dir,
+        commandArgs: app.commandArgs,
+        localUrl: url,
+        gatewayUrl,
+      })
+    );
 
     env = {
       ...pkgEnv,
       PORT: String(appPort),
       HOST: "127.0.0.1",
+      PLESS_URL: url,
       PORTLESS_URL: url,
+      ...(gatewayUrl
+        ? { PLESS_TAILSCALE_URL: gatewayUrl, PORTLESS_TAILSCALE_URL: gatewayUrl }
+        : {}),
     };
 
     if (tls) {
@@ -2779,6 +3118,7 @@ async function spawnProxiedApp(
 
   const capturedStore = store;
   const capturedHostname = hostname;
+  const capturedAppPort = appPort;
   child.on("exit", (code, signal) => {
     exitCodes.set(app.name, code);
     if (code !== 0 && code !== null) {
@@ -2788,14 +3128,14 @@ async function spawnProxiedApp(
     }
     if (capturedStore && capturedHostname) {
       try {
-        capturedStore.removeRoute(capturedHostname);
+        capturedStore.removeRoute(capturedHostname, process.pid, capturedAppPort ?? undefined);
       } catch {
         // non-fatal
       }
     }
   });
 
-  const route = store && hostname ? { store, hostname } : null;
+  const route = store && hostname && appPort !== null ? { store, hostname, port: appPort } : null;
   return { child, displayUrl, route };
 }
 
@@ -2889,7 +3229,7 @@ async function handleDefaultMulti(
       throw err;
     }
 
-    // Merge (closest wins): package.json "portless" > portless.json app entry > defaults
+    // Merge (closest wins): package.json "pless" > pless.json app entry > defaults
     const appOverride: AppConfig = {
       ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
       ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
@@ -2939,9 +3279,10 @@ async function handleDefaultMulti(
   const proxiedApps = apps.filter((a) => a.proxied);
   const taskApps = apps.filter((a) => !a.proxied);
 
-  console.log(chalk.blue.bold(`\nportless\n`));
+  console.log(chalk.blue.bold(`\npless\n`));
 
   let { dir, port, tls, tld } = await discoverState();
+  let gatewayUrl: string | undefined;
 
   if (proxiedApps.length > 0) {
     let multiDesired: ProxyDesiredState;
@@ -2965,14 +3306,37 @@ async function handleDefaultMulti(
     if (tls && !isCATrusted(dir)) {
       await handleTrust();
     }
+
+    if (wantsGatewayTailscale()) {
+      try {
+        const tsReady = ensureTailscaleReady();
+        gatewayUrl = await ensureTailscaleGateway(dir, tsReady.baseUrl);
+        console.log(chalk.green(`  Tailscale -> ${gatewayUrl}`));
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(colors.red(`Error: ${message}`));
+        process.exit(1);
+      }
+    }
   }
 
   const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
 
   if (useTurbo) {
-    await runWithTurbo(wsRoot, dir, port, tls, tld, scriptName, proxiedApps, taskApps, extraArgs);
+    await runWithTurbo(
+      wsRoot,
+      dir,
+      port,
+      tls,
+      tld,
+      scriptName,
+      proxiedApps,
+      taskApps,
+      extraArgs,
+      gatewayUrl
+    );
   } else {
-    await runWithDirectSpawn(dir, port, tls, tld, proxiedApps, taskApps);
+    await runWithDirectSpawn(dir, port, tls, tld, proxiedApps, taskApps, gatewayUrl);
   }
 }
 
@@ -2985,7 +3349,8 @@ async function runWithTurbo(
   scriptName: string,
   proxiedApps: MultiAppEntry[],
   taskApps: MultiAppEntry[],
-  extraArgs: string[] = []
+  extraArgs: string[] = [],
+  gatewayUrl?: string
 ): Promise<void> {
   const store = new RouteStore(stateDir, {
     onWarning: (msg: string) => console.warn(colors.yellow(msg)),
@@ -2996,9 +3361,9 @@ async function runWithTurbo(
   const appUrls: { label: string; url: string }[] = [];
 
   for (const app of proxiedApps) {
-    const usesPortless = app.commandArgs[0] === "portless";
+    const usesPortless = app.commandArgs[0] === CLI_NAME || app.commandArgs[0] === LEGACY_CLI_NAME;
     if (usesPortless) {
-      appUrls.push({ label: app.label, url: "(managed by portless)" });
+      appUrls.push({ label: app.label, url: `managed by ${commandName()}` });
       continue;
     }
 
@@ -3010,13 +3375,30 @@ async function runWithTurbo(
     appUrls.push({ label: app.label, url });
 
     const hostname = parseHostname(app.name, tld);
-    store.addRoute(hostname, appPort, process.pid);
+    store.addRoute(
+      hostname,
+      appPort,
+      process.pid,
+      false,
+      wantsGatewayTailscale(),
+      getRouteMetadata({
+        appName: app.name,
+        cwd: app.pkg.dir,
+        commandArgs: app.commandArgs,
+        localUrl: url,
+        gatewayUrl,
+      })
+    );
     routes.push({ hostname });
 
     const entry: ManifestEntry = {
       PORT: String(appPort),
       HOST: "127.0.0.1",
+      PLESS_URL: url,
       PORTLESS_URL: url,
+      ...(gatewayUrl
+        ? { PLESS_TAILSCALE_URL: gatewayUrl, PORTLESS_TAILSCALE_URL: gatewayUrl }
+        : {}),
     };
     if (tls) {
       const caPath = path.join(stateDir, "ca.pem");
@@ -3075,7 +3457,7 @@ async function runWithTurbo(
 
     for (const { hostname } of routes) {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid);
       } catch {
         // non-fatal
       }
@@ -3103,12 +3485,13 @@ async function runWithDirectSpawn(
   tls: boolean,
   tld: string,
   proxiedApps: MultiAppEntry[],
-  taskApps: MultiAppEntry[]
+  taskApps: MultiAppEntry[],
+  gatewayUrl?: string
 ): Promise<void> {
   const children: ReturnType<typeof spawn>[] = [];
   const exitCodes = new Map<string, number | null>();
   const appUrls: { label: string; url: string }[] = [];
-  const routeEntries: { store: RouteStore; hostname: string }[] = [];
+  const routeEntries: { store: RouteStore; hostname: string; port: number }[] = [];
 
   // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
   // a port, so parallel spawning could cause port collisions.
@@ -3119,17 +3502,16 @@ async function runWithDirectSpawn(
       proxyPort,
       tls,
       tld,
-      exitCodes
+      exitCodes,
+      gatewayUrl
     );
     children.push(child);
     if (route) routeEntries.push(route);
     appUrls.push({ label: app.label, url: displayUrl });
   }
 
-  const taskLabels: string[] = [];
   for (const app of taskApps) {
     children.push(spawnTaskApp(app, exitCodes));
-    taskLabels.push(app.label);
   }
 
   // Print a clean summary after all processes are spawned.
@@ -3160,9 +3542,9 @@ async function runWithDirectSpawn(
       }
     }, SIGKILL_TIMEOUT_MS).unref();
 
-    for (const { store, hostname } of routeEntries) {
+    for (const { store, hostname, port } of routeEntries) {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid, port);
       } catch {
         // non-fatal
       }
@@ -3208,9 +3590,9 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
     console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless run <command...>"));
+    console.error(colors.cyan("  pless run <command...>"));
     console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless run next dev"));
+    console.error(colors.cyan("  pless run next dev"));
     process.exit(1);
   }
 
@@ -3230,7 +3612,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = "pless.json";
   } else {
     const inferred = inferProjectName();
     baseName = inferred.name;
@@ -3270,9 +3652,9 @@ async function handleNamedMode(args: string[]): Promise<void> {
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
     console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless <name> <command...>"));
+    console.error(colors.cyan("  pless <name> <command...>"));
     console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless myapp next dev"));
+    console.error(colors.cyan("  pless myapp next dev"));
     process.exit(1);
   }
 
@@ -3314,6 +3696,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  normalizeEnvAliases();
+
   if (process.stdin.isTTY) {
     process.on("exit", () => {
       try {
@@ -3328,24 +3712,24 @@ async function main() {
 
   // Block one-off npx / pnpm dlx downloads. Running "sudo npx" is unsafe
   // because it performs package resolution and downloads as root. When
-  // portless is installed as a project dependency the env vars still fire,
+  // pless is installed as a project dependency the env vars still fire,
   // so skip the block if we can find a local installation.
   const isNpx = process.env.npm_command === "exec" && !process.env.npm_lifecycle_event;
   const isPnpmDlx = !!process.env.PNPM_SCRIPT_SRC_DIR && !process.env.npm_lifecycle_event;
   if ((isNpx || isPnpmDlx) && !isLocallyInstalled()) {
-    console.error(colors.red("Error: portless should not be run via npx or pnpm dlx."));
+    console.error(colors.red("Error: pless should not be run via npx or pnpm dlx."));
     console.error(colors.blue("Install globally or as a project dependency:"));
-    console.error(colors.cyan("  npm install -g portless"));
-    console.error(colors.cyan("  npm install -D portless"));
+    console.error(colors.cyan("  npm install -g pless"));
+    console.error(colors.cyan("  npm install -D pless"));
     process.exit(1);
   }
 
   // --lan / --ip / --lan-ip-auto: global flags that enable LAN mode.
   // Strip from args and convert to env vars so all downstream code paths
   // see them regardless of where the user placed them (e.g.
-  // `portless --lan run ...`, `portless proxy start --lan`).
+  // `pless --lan run ...`, `pless proxy start --lan`).
   // Only scan before the `--` separator to avoid consuming flags meant
-  // for the child command (e.g. `portless run tool -- --ip 0.0.0.0`).
+  // for the child command (e.g. `pless run tool -- --ip 0.0.0.0`).
   //
   // Helper: find a flag before `--`, strip it (and optionally its value)
   // from args, and return the value (or true for boolean flags).
@@ -3365,17 +3749,17 @@ async function main() {
   };
 
   if (stripGlobalFlag("--lan", false)) {
-    process.env.PORTLESS_LAN = "1";
+    setEnv("LAN", "1");
   }
 
   const ipResult = stripGlobalFlag("--ip", true);
   if (ipResult === false) {
     console.error(chalk.red("Error: --ip requires an IP address."));
-    console.error(chalk.cyan("  portless --lan --ip 192.168.1.42 run <command>"));
+    console.error(chalk.cyan("  pless --lan --ip 192.168.1.42 run <command>"));
     process.exit(1);
   } else if (typeof ipResult === "string") {
-    process.env.PORTLESS_LAN_IP = ipResult;
-    process.env.PORTLESS_LAN = "1";
+    setEnv("LAN_IP", ipResult);
+    setEnv("LAN", "1");
   }
 
   const autoIpResult = stripGlobalFlag(INTERNAL_LAN_IP_FLAG, true);
@@ -3384,22 +3768,28 @@ async function main() {
     process.exit(1);
   } else if (typeof autoIpResult === "string") {
     process.env[INTERNAL_LAN_IP_ENV] = autoIpResult;
-    process.env.PORTLESS_LAN = "1";
+    setEnv("LAN", "1");
   }
 
   if (stripGlobalFlag("--tailscale", false)) {
-    process.env.PORTLESS_TAILSCALE = "1";
+    setEnv("TAILSCALE", "1");
+  }
+  if (stripGlobalFlag("--no-tailscale", false)) {
+    setEnv("TAILSCALE", "0");
+  }
+  if (stripGlobalFlag("--tailscale-direct", false)) {
+    setEnv("TAILSCALE_DIRECT", "1");
   }
   if (stripGlobalFlag("--funnel", false)) {
-    process.env.PORTLESS_FUNNEL = "1";
-    process.env.PORTLESS_TAILSCALE = "1";
+    setEnv("FUNNEL", "1");
+    setEnv("TAILSCALE_DIRECT", "1");
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.
   const scriptResult = stripGlobalFlag("--script", true);
   if (scriptResult === false) {
     console.error(colors.red("Error: --script requires a script name."));
-    console.error(colors.cyan("  portless --script start"));
+    console.error(colors.cyan("  pless --script start"));
     process.exit(1);
   }
   const globalScript = typeof scriptResult === "string" ? scriptResult : undefined;
@@ -3411,10 +3801,13 @@ async function main() {
     args.shift();
     if (!args[0]) {
       console.error(colors.red("Error: --name requires an app name."));
-      console.error(colors.cyan("  portless --name <name> <command...>"));
+      console.error(colors.cyan("  pless --name <name> <command...>"));
       process.exit(1);
     }
     const skipPortless =
+      process.env.PLESS === "0" ||
+      process.env.PLESS === "false" ||
+      process.env.PLESS === "skip" ||
       process.env.PORTLESS === "0" ||
       process.env.PORTLESS === "false" ||
       process.env.PORTLESS === "skip";
@@ -3438,6 +3831,9 @@ async function main() {
   }
 
   const skipPortless =
+    process.env.PLESS === "0" ||
+    process.env.PLESS === "false" ||
+    process.env.PLESS === "skip" ||
     process.env.PORTLESS === "0" ||
     process.env.PORTLESS === "false" ||
     process.env.PORTLESS === "skip";
@@ -3465,8 +3861,12 @@ async function main() {
 
   // Global dispatch: help, version, trust, clean, prune, list, alias, hosts, proxy
   // When `run` is used, skip these so args like "list" or "--help" are treated
-  // as child-command tokens, not portless subcommands.
+  // as child-command tokens, not pless subcommands.
   if (!isRunCommand) {
+    if (args[0] === "gateway") {
+      await handleGateway(args);
+      return;
+    }
     if (args[0] === "--help" || args[0] === "-h") {
       printHelp();
       return;
@@ -3516,7 +3916,7 @@ async function main() {
     }
   }
 
-  // Run app (either `portless run <cmd>` or `portless <name> <cmd>`)
+  // Run app (either `pless run <cmd>` or `pless <name> <cmd>`)
   if (isRunCommand) {
     await handleRunMode(args, globalScript);
   } else {

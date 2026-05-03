@@ -163,10 +163,19 @@ describe("RouteStore", () => {
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0]).toEqual({
+        id: `myapp.localhost:4001:${process.pid}`,
         hostname: "myapp.localhost",
         port: 4001,
         pid: process.pid,
       });
+    });
+
+    it("allows duplicate hostnames when requested", () => {
+      store.addRoute("myapp.localhost", 4001, process.pid, false, true);
+      store.addRoute("myapp.localhost", 4002, process.pid, false, true);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(2);
+      expect(routes.map((route) => route.port).sort()).toEqual([4001, 4002]);
     });
 
     it("replaces existing route with same hostname", () => {

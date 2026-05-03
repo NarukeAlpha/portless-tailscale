@@ -167,7 +167,7 @@ describe("constants", () => {
   });
 
   it("USER_STATE_DIR is in home directory", () => {
-    expect(USER_STATE_DIR).toBe(path.join(os.homedir(), ".portless"));
+    expect(USER_STATE_DIR).toBe(path.join(os.homedir(), ".pless"));
   });
 });
 

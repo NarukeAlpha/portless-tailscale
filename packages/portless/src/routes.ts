@@ -22,7 +22,15 @@ export const FILE_MODE = 0o644;
 export const DIR_MODE = 0o755;
 
 export interface RouteMapping extends RouteInfo {
+  id: string;
   pid: number;
+  appName?: string;
+  cwd?: string;
+  folder?: string;
+  command?: string;
+  startedAt?: string;
+  localUrl?: string;
+  gatewayUrl?: string;
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
@@ -30,13 +38,27 @@ export interface RouteMapping extends RouteInfo {
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const route = value as Record<string, unknown>;
   return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as RouteMapping).hostname === "string" &&
-    typeof (value as RouteMapping).port === "number" &&
-    typeof (value as RouteMapping).pid === "number"
+    typeof route.hostname === "string" &&
+    typeof route.port === "number" &&
+    typeof route.pid === "number" &&
+    (route.id === undefined || typeof route.id === "string") &&
+    (route.appName === undefined || typeof route.appName === "string") &&
+    (route.cwd === undefined || typeof route.cwd === "string") &&
+    (route.folder === undefined || typeof route.folder === "string") &&
+    (route.command === undefined || typeof route.command === "string") &&
+    (route.startedAt === undefined || typeof route.startedAt === "string") &&
+    (route.localUrl === undefined || typeof route.localUrl === "string") &&
+    (route.gatewayUrl === undefined || typeof route.gatewayUrl === "string")
   );
+}
+
+function routeId(hostname: string, port: number, pid: number): string {
+  return `${hostname}:${port}:${pid}`;
 }
 
 /**
@@ -178,7 +200,10 @@ export class RouteStore {
         this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
         return [];
       }
-      const routes: RouteMapping[] = parsed.filter(isValidRoute);
+      const routes: RouteMapping[] = parsed.filter(isValidRoute).map((route) => ({
+        ...route,
+        id: route.id || routeId(route.hostname, route.port, route.pid),
+      }));
       // Filter out stale routes whose owning process is no longer alive
       const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
       if (persistCleanup && alive.length !== routes.length) {
@@ -209,7 +234,19 @@ export class RouteStore {
    * replaced. Returns the PID of the killed process (if any) so the caller can
    * log it.
    */
-  addRoute(hostname: string, port: number, pid: number, force = false): number | undefined {
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    allowDuplicateHostname = false,
+    metadata: Partial<
+      Pick<
+        RouteMapping,
+        "appName" | "cwd" | "folder" | "command" | "startedAt" | "localUrl" | "gatewayUrl"
+      >
+    > = {}
+  ): number | undefined {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -217,21 +254,37 @@ export class RouteStore {
     let killedPid: number | undefined;
     try {
       const routes = this.loadRoutes(true);
-      const existing = routes.find((r) => r.hostname === hostname);
-      if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid)) {
-        if (!force) {
-          throw new RouteConflictError(hostname, existing.pid);
+      const existingRoutes = routes.filter((r) => r.hostname === hostname && r.pid !== pid);
+      const liveExisting = existingRoutes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
+      if (liveExisting.length > 0) {
+        if (!force && !allowDuplicateHostname) {
+          throw new RouteConflictError(hostname, liveExisting[0].pid);
         }
-        // --force: kill the existing process before taking over
-        try {
-          process.kill(existing.pid, "SIGTERM");
-          killedPid = existing.pid;
-        } catch {
-          // Process may have exited between the check and the kill; non-fatal
+        if (force) {
+          for (const existing of liveExisting) {
+            if (existing.pid === 0) continue;
+            try {
+              process.kill(existing.pid, "SIGTERM");
+              killedPid ??= existing.pid;
+            } catch {
+              // Process may have exited between the check and the kill; non-fatal
+            }
+          }
         }
       }
-      const filtered = routes.filter((r) => r.hostname !== hostname);
-      const entry: RouteMapping = { hostname, port, pid };
+      const filtered = routes.filter((r) => {
+        if (r.hostname !== hostname) return true;
+        if (force) return false;
+        if (allowDuplicateHostname) return r.pid !== pid || r.port !== port;
+        return r.pid !== pid;
+      });
+      const entry: RouteMapping = {
+        id: routeId(hostname, port, pid),
+        hostname,
+        port,
+        pid,
+        ...metadata,
+      };
       filtered.push(entry);
       this.saveRoutes(filtered);
     } finally {
@@ -260,7 +313,10 @@ export class RouteStore {
       if (!Array.isArray(parsed)) {
         return [];
       }
-      return parsed.filter(isValidRoute);
+      return parsed.filter(isValidRoute).map((route) => ({
+        ...route,
+        id: route.id || routeId(route.hostname, route.port, route.pid),
+      }));
     } catch {
       return [];
     }
@@ -301,7 +357,14 @@ export class RouteStore {
    */
   updateRoute(
     hostname: string,
-    fields: Partial<Pick<RouteMapping, "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel">>
+    fields: Partial<
+      Pick<
+        RouteMapping,
+        "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel" | "gatewayUrl" | "localUrl"
+      >
+    >,
+    pid?: number,
+    port?: number
   ): void {
     this.ensureDir();
     if (!this.acquireLock()) {
@@ -309,25 +372,37 @@ export class RouteStore {
     }
     try {
       const routes = this.loadRoutes(true);
-      const route = routes.find((r) => r.hostname === hostname);
+      const route = routes.find(
+        (r) =>
+          r.hostname === hostname &&
+          (pid === undefined || r.pid === pid) &&
+          (port === undefined || r.port === port)
+      );
       if (!route) return;
       if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
       if (fields.tailscaleHttpsPort !== undefined)
         route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
       if (fields.tailscaleFunnel !== undefined) route.tailscaleFunnel = fields.tailscaleFunnel;
+      if (fields.gatewayUrl !== undefined) route.gatewayUrl = fields.gatewayUrl;
+      if (fields.localUrl !== undefined) route.localUrl = fields.localUrl;
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();
     }
   }
 
-  removeRoute(hostname: string): void {
+  removeRoute(hostname: string, pid?: number, port?: number): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
-      const routes = this.loadRoutes(true).filter((r) => r.hostname !== hostname);
+      const routes = this.loadRoutes(true).filter(
+        (r) =>
+          r.hostname !== hostname ||
+          (pid !== undefined && r.pid !== pid) ||
+          (port !== undefined && r.port !== port)
+      );
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();

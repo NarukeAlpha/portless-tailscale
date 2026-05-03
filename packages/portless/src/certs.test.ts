@@ -366,7 +366,7 @@ describe("trustCA", () => {
     const result = trustCA(tmpDir);
     expect(result.trusted).toBe(false);
     expect(result.error).toContain("CA certificate not found");
-    expect(result.error).toContain("portless trust");
+    expect(result.error).toContain("pless trust");
   });
 
   it.skipIf(process.platform !== "darwin")(
