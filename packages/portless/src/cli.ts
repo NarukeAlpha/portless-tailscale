@@ -1152,7 +1152,10 @@ async function runApp(
 
   if (wantsTailscaleGateway || wantsTailscaleDirect) {
     try {
-      const tsReady = ensureTailscaleReady();
+      const tsReady = ensureTailscaleReady({
+        requireFunnel: wantsFunnel,
+        requireHttps: true,
+      });
       tsBaseUrl = tsReady.baseUrl;
       tailscaleHost = new URL(tsReady.baseUrl).hostname;
     } catch (err: unknown) {
@@ -1160,7 +1163,7 @@ async function runApp(
       console.error(colors.red(`Error: ${message}`));
       if (message.includes("not found")) {
         console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
-      } else {
+      } else if (!message.includes("not enabled on your tailnet")) {
         console.error(colors.blue("Make sure Tailscale is connected:"));
         console.error(colors.cyan("  tailscale up"));
       }
@@ -1737,6 +1740,8 @@ ${colors.bold("Tailscale sharing:")}
   Use --no-tailscale to run local-only. Use --tailscale-direct for the
   upstream-style one-app-per-Tailscale-port behavior. Use --funnel to expose
   your dev server publicly via Tailscale Funnel.
+  Requires Tailscale CLI to be installed and connected, with Tailscale
+  HTTPS certificates enabled. Funnel must also be enabled on your tailnet.
   ${colors.cyan("pless myapp next dev")}
   ${colors.cyan("pless --tailscale-direct myapp next dev")}
   ${colors.cyan("pless myapp --funnel next dev")}
@@ -3309,12 +3314,20 @@ async function handleDefaultMulti(
 
     if (wantsGatewayTailscale()) {
       try {
-        const tsReady = ensureTailscaleReady();
+        const tsReady = ensureTailscaleReady({
+          requireHttps: true,
+        });
         gatewayUrl = await ensureTailscaleGateway(dir, tsReady.baseUrl);
         console.log(chalk.green(`  Tailscale -> ${gatewayUrl}`));
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(colors.red(`Error: ${message}`));
+        if (message.includes("not found")) {
+          console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
+        } else if (!message.includes("not enabled on your tailnet")) {
+          console.error(colors.blue("Make sure Tailscale is connected:"));
+          console.error(colors.cyan("  tailscale up"));
+        }
         process.exit(1);
       }
     }
