@@ -155,7 +155,7 @@ function hasFunnelCapability(status: TailscaleStatusJson): boolean {
 function throwHttpsNotEnabled(): never {
   throw new Error(
     "Tailscale HTTPS is not enabled on your tailnet. " +
-      "Enable HTTPS certificates in Tailscale DNS settings, then run portless again."
+      "Enable HTTPS certificates in Tailscale DNS settings, then run pless again."
   );
 }
 
@@ -167,7 +167,7 @@ function throwFunnelNotEnabled(status: TailscaleStatusJson): never {
       : "";
   throw new Error(
     "Tailscale Funnel is not enabled on your tailnet. " +
-      "Enable Funnel for this node, then run portless again." +
+      "Enable Funnel for this node, then run pless again." +
       enableUrl
   );
 }
@@ -290,7 +290,7 @@ function formatFunnelNotEnabledError(stderr: string, stdout: string): string {
   const details = normalizeSpace(`${stderr}\n${stdout}`);
   return (
     "Tailscale Funnel is not enabled on your tailnet. " +
-    "Enable Funnel for this node, then run portless again." +
+    "Enable Funnel for this node, then run pless again." +
     (details ? ` Tailscale said: ${details}` : "")
   );
 }
@@ -326,7 +326,7 @@ function register(
     }
     if (mode === "funnel" && errno.code === "ETIMEDOUT") {
       throw new Error(
-        "Tailscale Funnel registration timed out. Make sure Funnel is enabled on your tailnet, then run portless again."
+        "Tailscale Funnel registration timed out. Make sure Funnel is enabled on your tailnet, then run pless again."
       );
     }
     throw new Error(`Failed to register tailscale ${mode}: ${result.error.message}`);
