@@ -70,7 +70,7 @@ describe("buildServiceSpec", () => {
     const spec = buildServiceSpec({
       platform: "darwin",
       nodePath: "/usr/local/bin/node",
-      entryScript: "/usr/local/lib/node_modules/portless/dist/cli.js",
+      entryScript: "/usr/local/lib/node_modules/pless/dist/cli.js",
       userHome: "/Users/alice",
       uid: "501",
       gid: "20",
@@ -78,10 +78,10 @@ describe("buildServiceSpec", () => {
 
     expect(spec.platform).toBe("darwin");
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
-    expect(spec.plistPath).toBe("/Library/LaunchDaemons/sh.portless.proxy.plist");
+    expect(spec.plistPath).toBe("/Library/LaunchDaemons/sh.pless.proxy.plist");
     expect(spec.programArguments).toEqual([
       "/usr/local/bin/node",
-      "/usr/local/lib/node_modules/portless/dist/cli.js",
+      "/usr/local/lib/node_modules/pless/dist/cli.js",
       "proxy",
       "start",
       "--foreground",
@@ -93,7 +93,7 @@ describe("buildServiceSpec", () => {
     expect(spec.plist).toContain("<key>RunAtLoad</key>");
     expect(spec.plist).toContain("<key>KeepAlive</key>");
     expect(spec.plist).toContain("<key>PORTLESS_STATE_DIR</key>");
-    expect(spec.plist).toContain("<string>/Users/alice/.portless</string>");
+    expect(spec.plist).toContain("<string>/Users/alice/.pless</string>");
     expect(spec.plist).toContain("<key>SUDO_UID</key>");
     expect(spec.plist).toContain("<string>501</string>");
   });
@@ -102,7 +102,7 @@ describe("buildServiceSpec", () => {
     const spec = buildServiceSpec({
       platform: "linux",
       nodePath: "/usr/bin/node",
-      entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
+      entryScript: "/usr/lib/node_modules/pless/dist/cli.js",
       userHome: "/home/alice",
       uid: "1000",
       gid: "1000",
@@ -110,10 +110,10 @@ describe("buildServiceSpec", () => {
 
     expect(spec.platform).toBe("linux");
     if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
-    expect(spec.unitPath).toBe("/etc/systemd/system/portless.service");
+    expect(spec.unitPath).toBe("/etc/systemd/system/pless.service");
     expect(spec.execStart).toEqual([
       "/usr/bin/node",
-      "/usr/lib/node_modules/portless/dist/cli.js",
+      "/usr/lib/node_modules/pless/dist/cli.js",
       "proxy",
       "start",
       "--foreground",
@@ -123,10 +123,10 @@ describe("buildServiceSpec", () => {
       "--skip-trust",
     ]);
     expect(spec.unit).toContain("Description=Portless HTTPS proxy");
-    expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.portless"');
+    expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.pless"');
     expect(spec.unit).toContain('Environment=SUDO_UID="1000"');
     expect(spec.unit).toContain(
-      'ExecStart="/usr/bin/node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
+      'ExecStart="/usr/bin/node" "/usr/lib/node_modules/pless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
     );
     expect(spec.unit).toContain("WantedBy=multi-user.target");
   });
@@ -146,9 +146,9 @@ describe("buildServiceSpec", () => {
     expect(spec.createArgs).toContain("ONSTART");
     expect(spec.createArgs).toContain("/RU");
     expect(spec.createArgs).toContain("SYSTEM");
-    expect(spec.scriptPath).toBe("C:\\ProgramData\\portless\\service\\portless-service.cmd");
-    expect(spec.taskRun).toBe('"C:\\ProgramData\\portless\\service\\portless-service.cmd"');
-    expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\Alice\\.portless");
+    expect(spec.scriptPath).toBe("C:\\ProgramData\\pless\\service\\pless-service.cmd");
+    expect(spec.taskRun).toBe('"C:\\ProgramData\\pless\\service\\pless-service.cmd"');
+    expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\Alice\\.pless");
     expect(spec.script).toContain('"C:\\Program Files\\nodejs\\node.exe"');
     expect(spec.script).toContain("proxy");
     expect(spec.script).toContain("--port");
@@ -181,7 +181,7 @@ describe("buildServiceSpec", () => {
     });
 
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
-    expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\100%%Done\\.portless");
+    expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\100%%Done\\.pless");
     expect(spec.script).not.toMatch(/(?<!%)%(?!%)/);
   });
 
@@ -189,7 +189,7 @@ describe("buildServiceSpec", () => {
     const spec = buildServiceSpec({
       platform: "darwin",
       nodePath: "/usr/local/bin/node",
-      entryScript: "/usr/local/lib/portless/cli.js",
+      entryScript: "/usr/local/lib/pless/cli.js",
       userHome: "/Users/bob",
       uid: "501",
       gid: "20",
@@ -207,7 +207,7 @@ describe("buildServiceUninstallSudoArgs", () => {
       nodePath: "/usr/bin/node",
       home: "/Users/alice",
       env: {
-        PORTLESS_STATE_DIR: "/Users/alice/.portless",
+        PORTLESS_STATE_DIR: "/Users/alice/.pless",
         PORTLESS_DEBUG: "1",
         OTHER_ENV: "ignored",
       },
@@ -217,7 +217,7 @@ describe("buildServiceUninstallSudoArgs", () => {
       "env",
       "PORTLESS_DEBUG=1",
       "HOME=/Users/alice",
-      "PORTLESS_STATE_DIR=/Users/alice/.portless",
+      "PORTLESS_STATE_DIR=/Users/alice/.pless",
       "/usr/bin/node",
       "/fake/cli.js",
       "service",
@@ -293,7 +293,7 @@ describe("handleService", () => {
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(0);
     const output = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
-    expect(output).toContain("portless service");
+    expect(output).toContain("pless service");
     expect(output).toContain("service install");
     expect(output).toContain("service uninstall");
     expect(output).toContain("service status");
@@ -338,7 +338,7 @@ describe("handleService", () => {
         call.args.join(" ") === "/fake/cli.js proxy stop --port 443"
     );
     const restartIndex = calls.findIndex(
-      (call) => call.command === "systemctl" && call.args.join(" ") === "restart portless.service"
+      (call) => call.command === "systemctl" && call.args.join(" ") === "restart pless.service"
     );
 
     expect(stopIndex).toBeGreaterThanOrEqual(0);

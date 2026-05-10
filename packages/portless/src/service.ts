@@ -13,9 +13,9 @@ import {
 import { fixOwnership } from "./utils.js";
 
 const SERVICE_PORT = getProtocolPort(true);
-const SERVICE_LABEL = "sh.portless.proxy";
-const SYSTEMD_SERVICE = "portless.service";
-const WINDOWS_TASK_NAME = "Portless Proxy";
+const SERVICE_LABEL = "sh.pless.proxy";
+const SYSTEMD_SERVICE = "pless.service";
+const WINDOWS_TASK_NAME = "Pless Proxy";
 const INTERNAL_ELEVATED_ENV = "PORTLESS_INTERNAL_SERVICE_ELEVATED";
 
 type SupportedPlatform = "darwin" | "linux" | "win32";
@@ -180,6 +180,7 @@ function buildProxyCommand(entryScript: string): string[] {
 
 function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
   const env: Record<string, string> = {
+    PLESS_STATE_DIR: ctx.stateDir,
     PORTLESS_STATE_DIR: ctx.stateDir,
   };
 
@@ -197,8 +198,8 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
 
 function defaultStateDir(platform: SupportedPlatform, userHome: string): string {
   return platform === "win32"
-    ? path.win32.join(userHome, ".portless")
-    : path.posix.join(userHome, ".portless");
+    ? path.win32.join(userHome, ".pless")
+    : path.posix.join(userHome, ".pless");
 }
 
 function buildLaunchdPlist(ctx: ServiceContext, programArguments: string[]): string {
@@ -325,8 +326,8 @@ export function buildServiceSpec(options: {
     };
   }
 
-  const scriptDir = path.win32.join(ctx.programData, "portless", "service");
-  const scriptPath = path.win32.join(scriptDir, "portless-service.cmd");
+  const scriptDir = path.win32.join(ctx.programData, "pless", "service");
+  const scriptPath = path.win32.join(scriptDir, "pless-service.cmd");
   const script = buildWindowsScript(ctx, proxyCommand);
   const taskRun = windowsQuote(scriptPath);
   return {
@@ -371,7 +372,10 @@ function currentServiceSpec(entryScript: string): ServiceSpec {
     uid: user.uid,
     gid: user.gid,
     username: user.username,
-    stateDir: process.env.PORTLESS_STATE_DIR || defaultStateDir(process.platform, user.home),
+    stateDir:
+      process.env.PLESS_STATE_DIR ||
+      process.env.PORTLESS_STATE_DIR ||
+      defaultStateDir(process.platform, user.home),
     pathEnv: process.env.PATH,
     programData: process.env.ProgramData,
   });
@@ -383,7 +387,7 @@ function collectPortlessEnvArgs(
 ): string[] {
   const envArgs: string[] = [];
   for (const key of Object.keys(env)) {
-    if (key.startsWith("PORTLESS_") && env[key] && !omit.has(key)) {
+    if ((key.startsWith("PORTLESS_") || key.startsWith("PLESS_")) && env[key] && !omit.has(key)) {
       envArgs.push(`${key}=${env[key]}`);
     }
   }
@@ -397,12 +401,13 @@ function buildElevatedEnvArgs(options: {
   extraEnv?: Record<string, string>;
 }): string[] {
   const extraEnv = options.extraEnv ?? {};
-  const overrideKeys = new Set(["PORTLESS_STATE_DIR", ...Object.keys(extraEnv)]);
+  const overrideKeys = new Set(["PORTLESS_STATE_DIR", "PLESS_STATE_DIR", ...Object.keys(extraEnv)]);
   return [
     "env",
     ...collectPortlessEnvArgs(options.env, overrideKeys),
     ...Object.entries(extraEnv).map(([key, value]) => `${key}=${value}`),
     `HOME=${options.home}`,
+    `PLESS_STATE_DIR=${options.stateDir}`,
     `PORTLESS_STATE_DIR=${options.stateDir}`,
   ];
 }
@@ -418,7 +423,8 @@ export function buildServiceUninstallSudoArgs(
 ): string[] {
   const env = options.env ?? process.env;
   const home = options.home ?? os.homedir();
-  const stateDir = options.stateDir ?? env.PORTLESS_STATE_DIR ?? path.join(home, ".portless");
+  const stateDir =
+    options.stateDir ?? env.PLESS_STATE_DIR ?? env.PORTLESS_STATE_DIR ?? path.join(home, ".pless");
   return [
     ...buildElevatedEnvArgs({ home, stateDir, env }),
     options.nodePath ?? process.execPath,
@@ -434,7 +440,8 @@ function requireUnixElevation(args: string[], runner: CommandRunner): void {
   if (process.env[INTERNAL_ELEVATED_ENV] === "1") return;
 
   const home = os.homedir();
-  const stateDir = process.env.PORTLESS_STATE_DIR || path.join(home, ".portless");
+  const stateDir =
+    process.env.PLESS_STATE_DIR || process.env.PORTLESS_STATE_DIR || path.join(home, ".pless");
   const result = runner(
     "sudo",
     [
@@ -499,7 +506,7 @@ function prepareTrust(stateDir: string): void {
   }
   if (isCATrusted(stateDir)) return;
 
-  console.log(colors.gray("Trusting portless CA for service startup..."));
+  console.log(colors.gray("Trusting pless CA for service startup..."));
   const trustResult = trustCA(stateDir);
   if (trustResult.trusted) {
     console.log(colors.green("CA added to the system trust store."));
@@ -510,7 +517,7 @@ function prepareTrust(stateDir: string): void {
   if (trustResult.error) {
     console.warn(colors.gray(trustResult.error));
   }
-  console.warn(colors.yellow("Run `portless trust` if browsers show certificate warnings."));
+  console.warn(colors.yellow("Run `pless trust` if browsers show certificate warnings."));
 }
 
 async function installService(entryScript: string, runner: CommandRunner): Promise<void> {
@@ -569,7 +576,7 @@ async function uninstallService(entryScript: string, runner: CommandRunner): Pro
 }
 
 /**
- * Best-effort service removal for use by `portless clean`. Skips elevation
+ * Best-effort service removal for use by `pless clean`. Skips elevation
  * (caller is expected to already be elevated) and returns a result instead of
  * calling process.exit.
  */
@@ -661,7 +668,7 @@ async function getServiceStatus(
 async function printServiceStatus(entryScript: string, runner: CommandRunner): Promise<void> {
   const spec = currentServiceSpec(entryScript);
   const status = await getServiceStatus(entryScript, runner);
-  console.log(colors.bold("portless service"));
+  console.log(colors.bold("pless service"));
   console.log(`  Manager state: ${status.managerState}`);
   console.log(`  Installed: ${status.installed ? "yes" : "no"}`);
   console.log(`  Proxy on 443: ${status.proxyRunning ? "responding" : "not responding"}`);
@@ -673,12 +680,12 @@ async function printServiceStatus(entryScript: string, runner: CommandRunner): P
 
 export function printServiceHelp(): void {
   console.log(`
-${colors.bold("portless service")} - Start portless automatically when the OS starts.
+${colors.bold("pless service")} - Start pless automatically when the OS starts.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless service install")}      Install and start the HTTPS service on port 443
-  ${colors.cyan("portless service uninstall")}    Stop and remove the startup service
-  ${colors.cyan("portless service status")}       Show service and proxy status
+  ${colors.cyan("pless service install")}      Install and start the HTTPS service on port 443
+  ${colors.cyan("pless service uninstall")}    Stop and remove the startup service
+  ${colors.cyan("pless service status")}       Show service and proxy status
 
 ${colors.bold("Notes:")}
   The service uses the default clean URL mode: HTTPS on port 443.
