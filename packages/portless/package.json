@@ -1,6 +1,6 @@
 {
   "name": "pless",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Tailscale-first devbox gateway for stable local development URLs.",
   "type": "module",
   "main": "./dist/index.js",
