@@ -141,7 +141,7 @@ describe("buildServiceSpec", () => {
 
     expect(spec.platform).toBe("win32");
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
-    expect(spec.taskName).toBe("Portless Proxy");
+    expect(spec.taskName).toBe("Pless Proxy");
     expect(spec.createArgs).toContain("/SC");
     expect(spec.createArgs).toContain("ONSTART");
     expect(spec.createArgs).toContain("/RU");
@@ -217,6 +217,7 @@ describe("buildServiceUninstallSudoArgs", () => {
       "env",
       "PORTLESS_DEBUG=1",
       "HOME=/Users/alice",
+      "PLESS_STATE_DIR=/Users/alice/.pless",
       "PORTLESS_STATE_DIR=/Users/alice/.pless",
       "/usr/bin/node",
       "/fake/cli.js",
