@@ -1564,7 +1564,7 @@ ${colors.bold("Examples:")}
   pless run next dev               # -> https://<project>.localhost
   pless run --name myapp next dev  # -> https://myapp.localhost
   pless run vite dev               # -> https://<project>.localhost
-  pless run --app-port 3000 pnpm start
+  pless run --app-port 3000 bun start
 `);
       process.exit(0);
     } else if (args[i] === "--force") {
@@ -1837,7 +1837,7 @@ ${colors.bold("Safari / DNS:")}
     ${colors.cyan("pless hosts clean")}
 
 ${colors.bold("Skip pless:")}
-  PLESS=0 pnpm dev              # Runs command directly without proxy
+  PLESS=0 bun dev               # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
   run, get, alias, hosts, list, trust, clean, prune, proxy, service are subcommands and

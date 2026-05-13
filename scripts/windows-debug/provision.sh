@@ -150,11 +150,13 @@ $env:PATH = "C:\Program Files\nodejs;$env:PATH"
 [Environment]::SetEnvironmentVariable("PATH", "C:\Program Files\nodejs;$([Environment]::GetEnvironmentVariable('PATH', 'Machine'))", "Machine")
 Log "Node.js installed: $(node --version)"
 
-# Install pnpm via corepack
-Log "Installing pnpm..."
-corepack enable
-corepack prepare pnpm@latest --activate
-Log "pnpm installed: $(pnpm --version)"
+# Install Bun
+Log "Installing Bun..."
+npm install -g bun
+$bunPrefix = (npm prefix -g).Trim()
+$env:PATH = "$bunPrefix;$env:PATH"
+[Environment]::SetEnvironmentVariable("PATH", "$bunPrefix;$([Environment]::GetEnvironmentVariable('PATH', 'Machine'))", "Machine")
+Log "Bun installed: $(bun --version)"
 
 # Install OpenSSL (Shining Light builds, widely used on Windows)
 Log "Installing OpenSSL..."
@@ -173,9 +175,9 @@ Log "Repo cloned."
 
 # Install dependencies and build
 Log "Installing dependencies..."
-pnpm install
+bun install
 Log "Building..."
-pnpm build
+bun run build
 Log "Build complete."
 
 Log "--- Bootstrap complete ---"
@@ -208,7 +210,7 @@ aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 echo "Instance is running."
 
 echo ""
-echo "Instance $INSTANCE_ID is booting and bootstrapping (Git, Node.js, pnpm, OpenSSL)."
+echo "Instance $INSTANCE_ID is booting and bootstrapping (Git, Node.js, Bun, OpenSSL)."
 echo "Bootstrap takes ~10-15 minutes on first boot."
 echo ""
 echo "Check bootstrap progress:"
@@ -216,7 +218,7 @@ echo "  ./scripts/windows-debug/run.sh \"Get-Content C:\\bootstrap.log\""
 echo ""
 echo "Once ready, sync your branch and start debugging:"
 echo "  ./scripts/windows-debug/sync.sh"
-echo "  ./scripts/windows-debug/run.sh \"cd C:\\portless && pnpm test\""
+echo "  ./scripts/windows-debug/run.sh \"cd C:\\portless; bun run test\""
 echo ""
 echo "Stop when done to save costs:"
 echo "  ./scripts/windows-debug/stop.sh"
