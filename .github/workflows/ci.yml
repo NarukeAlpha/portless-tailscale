@@ -19,26 +19,25 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v4
+      - uses: oven-sh/setup-bun@v2
 
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - run: bun ci
 
-      - run: pnpm format:check
+      - run: bun run format:check
 
-      - run: pnpm lint
+      - run: bun run lint
 
-      - run: pnpm type-check
+      - run: bun run type-check
 
-      - run: pnpm build
+      - run: bun run build
 
-      - run: pnpm test
+      - run: bun run test
 
-      - run: pnpm test:e2e
+      - run: bun run test:e2e
 
   ci-windows:
     runs-on: windows-latest
@@ -50,17 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      - uses: oven-sh/setup-bun@v2
 
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - run: bun ci
 
-      - run: pnpm type-check
+      - run: bun run type-check
 
-      - run: pnpm build
+      - run: bun run build
 
-      - run: pnpm test
+      - run: bun run test

@@ -39,11 +39,13 @@ configuration.
 ## Install
 
 ```bash
+npm install -g bun
 git clone https://github.com/NarukeAlpha/portless-tailscale.git
 cd portless-tailscale
-corepack pnpm install
-corepack pnpm --filter pless build
-corepack pnpm --filter pless link --global
+bun install
+bun run --filter pless build
+cd packages/portless
+bun link --global
 ```
 
 ## Requirements
@@ -57,7 +59,7 @@ corepack pnpm --filter pless link --global
 
 ```bash
 pless myapp next dev
-pless api pnpm dev
+pless api bun dev
 pless run --name docs next dev
 ```
 

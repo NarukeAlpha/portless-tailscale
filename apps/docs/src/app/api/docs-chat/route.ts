@@ -1,7 +1,7 @@
 import { readFile } from "fs/promises";
 import { join } from "path";
 import { convertToModelMessages, stepCountIs, streamText } from "ai";
-import type { ModelMessage, UIMessage } from "ai";
+import type { ModelMessage, ToolSet, UIMessage } from "ai";
 import { createBashTool } from "bash-tool";
 import { headers } from "next/headers";
 import { allDocsPages } from "@/lib/docs-navigation";
@@ -103,13 +103,14 @@ export async function POST(req: Request) {
   const {
     tools: { bash, readFile: readFileTool },
   } = await createBashTool({ files: docsFiles });
+  const tools = { bash, readFile: readFileTool } as unknown as ToolSet;
 
   const result = streamText({
     model: DEFAULT_MODEL,
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(messages),
     stopWhen: stepCountIs(5),
-    tools: { bash, readFile: readFileTool },
+    tools,
     prepareStep: ({ messages: stepMessages }) => ({
       messages: addCacheControl(stepMessages),
     }),

@@ -19,7 +19,7 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
   if (env.PLESS_TAILSCALE === undefined && env.PORTLESS_TAILSCALE === undefined) {
     env.PLESS_TAILSCALE = "0";
   }
-  // Vitest runs under pnpm; strip parent-only vars so the CLI child does not look like pnpm dlx / npx.
+  // Strip parent-only vars so the CLI child does not look like a one-off package runner.
   delete env.PNPM_SCRIPT_SRC_DIR;
   if (env.npm_command === "exec") {
     delete env.npm_command;
@@ -89,7 +89,9 @@ async function getFreePort(): Promise<number> {
 describe("CLI", () => {
   beforeAll(() => {
     if (!fs.existsSync(CLI_PATH)) {
-      throw new Error(`Built CLI not found at ${CLI_PATH}. Run 'pnpm build' before running tests.`);
+      throw new Error(
+        `Built CLI not found at ${CLI_PATH}. Run 'bun run build' before running tests.`
+      );
     }
   });
 

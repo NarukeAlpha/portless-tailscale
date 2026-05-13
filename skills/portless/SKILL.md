@@ -60,7 +60,7 @@ Bare `portless` works out of the box. It runs the `"dev"` script from `package.j
 
 ```bash
 portless        # -> runs "dev" script, https://<project>.localhost
-pnpm dev        # -> works without portless, plain "next dev"
+bun dev         # -> works without portless, plain "next dev"
 ```
 
 Use an optional `portless.json` to override defaults (name, script, port):
@@ -107,7 +107,7 @@ For turborepo projects, use portless as the `dev` script with the real command i
 }
 ```
 
-`pnpm dev` runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy.
+`bun dev` runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `bun run dev:app` through the proxy.
 
 ### package.json scripts
 
@@ -127,7 +127,7 @@ The proxy auto-starts when you run an app. Or start it explicitly: `portless pro
 
 ```bash
 portless myapp next dev          # https://myapp.localhost
-portless api.myapp pnpm start    # https://api.myapp.localhost
+portless api.myapp bun start     # https://api.myapp.localhost
 portless docs.myapp next dev     # https://docs.myapp.localhost
 ```
 
@@ -152,7 +152,7 @@ No config changes needed. Put `portless run` in `package.json` once and it works
 Set `PORTLESS=0` to run the command directly without the proxy:
 
 ```bash
-PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
+PORTLESS=0 bun dev    # Bypasses proxy, uses default port
 ```
 
 ## How It Works
