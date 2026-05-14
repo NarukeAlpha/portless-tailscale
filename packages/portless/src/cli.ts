@@ -161,6 +161,12 @@ function wantsDirectTailscale(): boolean {
   return isEnvEnabled("TAILSCALE_DIRECT") || isEnvEnabled("FUNNEL");
 }
 
+function viteAdditionalAllowedHost(tld: string, tailscaleHost?: string): string | undefined {
+  if (tailscaleHost) return tailscaleHost;
+  if (tld !== DEFAULT_TLD) return `.${tld}`;
+  return undefined;
+}
+
 function getRouteMetadata(options: {
   appName: string;
   cwd: string;
@@ -492,6 +498,7 @@ function startProxyServer(
     const reason = mdnsSupport.reason ?? "mDNS publishing is not supported on this platform.";
     console.warn(chalk.yellow(`LAN mode disabled: ${reason}`));
   }
+  const listenHost = activeLanIp ?? "127.0.0.1";
 
   // Create empty routes file if it doesn't exist
   const routesPath = store.getRoutesPath();
@@ -591,8 +598,21 @@ function startProxyServer(
   // Publish mDNS for routes that already exist at startup
   publishCachedRoutes();
 
+  const readGatewayTarget = (): { hostname: string; port: number } | undefined => {
+    const port = readNumberFile(gatewayPortPath(store.dir));
+    if (port === null) return undefined;
+    try {
+      const gatewayUrl = fs.readFileSync(gatewayUrlPath(store.dir), "utf-8").trim();
+      const hostname = new URL(gatewayUrl).hostname;
+      return hostname ? { hostname, port } : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   const server = createProxyServer({
     getRoutes: () => cachedRoutes,
+    getGatewayTarget: readGatewayTarget,
     proxyPort,
     tld,
     strict,
@@ -631,10 +651,10 @@ function startProxyServer(
     redirectServer.on("error", () => {
       redirectServer = null;
     });
-    redirectServer.listen(80);
+    redirectServer.listen(80, listenHost);
   }
 
-  server.listen(proxyPort, () => {
+  server.listen(proxyPort, listenHost, () => {
     // Save PID and port once the server is actually listening
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
@@ -1164,7 +1184,8 @@ async function runApp(
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  commandCwd = process.cwd()
 ) {
   let store = initialStore;
   console.log(chalk.blue.bold(`\n${commandName()}\n`));
@@ -1386,7 +1407,7 @@ async function runApp(
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
-  injectFrameworkFlags(commandArgs, port);
+  injectFrameworkFlags(commandArgs, port, { cwd: commandCwd });
 
   // Point Node.js at the pless CA so server-side fetches (e.g. Next.js
   // Server Components) trust pless-proxied HTTPS services. Node.js does
@@ -1414,6 +1435,8 @@ async function runApp(
     )
   );
 
+  const viteAllowedHost = viteAdditionalAllowedHost(tld, tailscaleHost);
+
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
@@ -1421,7 +1444,7 @@ async function runApp(
       ...(hostBind ? { HOST: hostBind } : {}),
       PLESS_URL: finalUrl,
       PORTLESS_URL: finalUrl,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: [`.${tld}`, tailscaleHost].filter(Boolean).join(","),
+      ...(viteAllowedHost ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: viteAllowedHost } : {}),
       // Note: EXPO_PACKAGER_PROXY_URL is not used — expo-dev-client removed
       // baked-in pinging, making this env var ineffective. Expo handles its
       // own LAN discovery natively.
@@ -3027,7 +3050,8 @@ async function handleDefaultSingle(
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appConfig?.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    cwd
   );
 }
 
@@ -3127,6 +3151,7 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     hostname = parseHostname(app.name, tld);
+    injectFrameworkFlags(app.commandArgs, appPort, { cwd: app.pkg.dir });
     store.addRoute(
       hostname,
       appPort,
@@ -3142,12 +3167,23 @@ async function spawnProxiedApp(
       })
     );
 
+    let gatewayHost: string | undefined;
+    if (gatewayUrl) {
+      try {
+        gatewayHost = new URL(gatewayUrl).hostname;
+      } catch {
+        gatewayHost = undefined;
+      }
+    }
+    const viteAllowedHost = viteAdditionalAllowedHost(tld, gatewayHost);
+
     env = {
       ...pkgEnv,
       PORT: String(appPort),
       HOST: "127.0.0.1",
       PLESS_URL: url,
       PORTLESS_URL: url,
+      ...(viteAllowedHost ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: viteAllowedHost } : {}),
       ...(gatewayUrl
         ? { PLESS_TAILSCALE_URL: gatewayUrl, PORTLESS_TAILSCALE_URL: gatewayUrl }
         : {}),

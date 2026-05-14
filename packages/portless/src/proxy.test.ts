@@ -120,6 +120,38 @@ describe("createProxyServer", () => {
       expect(res.body).toContain('href="http://myapp.localhost:8080"');
     });
 
+    it("forwards local Tailscale gateway hostname requests to the gateway", async () => {
+      const gateway = trackServer(
+        http.createServer((req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end(`gateway:${req.url}`);
+        })
+      );
+      await listen(gateway);
+      const gatewayAddr = gateway.address();
+      if (!gatewayAddr || typeof gatewayAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "smoke.localhost", port: 4001 }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          getGatewayTarget: () => ({
+            hostname: "delta-bare.tail6624e2.ts.net",
+            port: gatewayAddr.port,
+          }),
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: "delta-bare.tail6624e2.ts.net",
+        path: "/smoke/4001",
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("gateway:/smoke/4001");
+    });
+
     it("omits port 80 in 404 page links", async () => {
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
       const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 80 }));

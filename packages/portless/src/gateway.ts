@@ -257,7 +257,20 @@ export function createGatewayServer(options: {
     }
 
     if (segments.length === 1) {
-      res.writeHead(200, { "Content-Type": "text/html" });
+      const hasAppRoutes = routes.some((route) => routeLabel(route) === segments[0]);
+      if (hasAppRoutes) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(renderAppDashboard(segments[0], routes, host));
+        return;
+      }
+
+      const selected = selectedRoute(routes, req);
+      if (selected) {
+        proxyHttp(selected, req, res, onError);
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "text/html" });
       res.end(renderAppDashboard(segments[0], routes, host));
       return;
     }

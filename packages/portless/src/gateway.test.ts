@@ -127,4 +127,32 @@ describe("createGatewayServer", () => {
     expect(proxied.status).toBe(200);
     expect(proxied.body).toBe("backend:/api/ping?x=1");
   });
+
+  it("proxies selected one-segment asset paths that are not app names", async () => {
+    backend = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/javascript" });
+      res.end(`module:${req.url}`);
+    });
+    const backendPort = await listen(backend);
+
+    const store = new RouteStore(tmpDir);
+    store.addRoute("myapp.localhost", backendPort, process.pid, false, true, {
+      appName: "myapp",
+      localUrl: "https://myapp.localhost",
+      gatewayUrl: "https://delta-bare.tail6624e2.ts.net",
+    });
+
+    gateway = createGatewayServer({ store });
+    const gatewayPort = await listen(gateway);
+
+    const selection = await request(gatewayPort, `/myapp/${backendPort}`);
+    const cookie = selection.headers["set-cookie"]?.[0]?.split(";")[0] ?? "";
+
+    const module = await request(gatewayPort, "/index.html?html-proxy&index=0.js", {
+      Cookie: cookie,
+    });
+    expect(module.status).toBe(200);
+    expect(module.headers["content-type"]).toBe("text/javascript");
+    expect(module.body).toBe("module:/index.html?html-proxy&index=0.js");
+  });
 });
