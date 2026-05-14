@@ -448,6 +448,48 @@ describe("injectFrameworkFlags", () => {
     expect(nodeArgs).toEqual(["node", "server.js"]);
   });
 
+  it("injects flags through bun run scripts that invoke vite", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bun-script-"));
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ scripts: { "dev:site": "vite --config apps/site/vite.config.ts" } })
+      );
+
+      const args = ["bun", "run", "dev:site"];
+      injectFrameworkFlags(args, 4567, { cwd: tmpDir });
+      expect(args).toEqual([
+        "bun",
+        "run",
+        "dev:site",
+        "--",
+        "--port",
+        "4567",
+        "--strictPort",
+        "--host",
+        "127.0.0.1",
+      ]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("respects package script port flags", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bun-script-"));
+    try {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ scripts: { dev: "vite --port 3000" } })
+      );
+
+      const args = ["bun", "run", "dev"];
+      injectFrameworkFlags(args, 4567, { cwd: tmpDir });
+      expect(args).toEqual(["bun", "run", "dev", "--", "--host", "127.0.0.1"]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("does nothing for empty args", () => {
     const args: string[] = [];
     injectFrameworkFlags(args, 4567);

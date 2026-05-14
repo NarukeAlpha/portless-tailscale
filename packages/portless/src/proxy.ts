@@ -112,6 +112,7 @@ export type ProxyServer = http.Server | net.Server;
 export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const {
     getRoutes,
+    getGatewayTarget,
     proxyPort,
     tld = "localhost",
     strict = true,
@@ -156,7 +157,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, host, strict);
+    const gatewayTarget = getGatewayTarget?.();
+    const route =
+      gatewayTarget?.hostname === host
+        ? { hostname: gatewayTarget.hostname, port: gatewayTarget.port }
+        : findRoute(routes, host, strict);
 
     if (!route) {
       const safeHost = escapeHtml(host);

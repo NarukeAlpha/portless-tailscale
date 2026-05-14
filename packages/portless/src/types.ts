@@ -16,6 +16,8 @@ export interface RouteInfo {
 export interface ProxyServerOptions {
   /** Called on each request to get the current route table. */
   getRoutes: () => RouteInfo[];
+  /** Called on each request to get the local Tailscale gateway target. */
+  getGatewayTarget?: () => { hostname: string; port: number } | undefined;
   /** The port the proxy is listening on (used to build correct URLs). */
   proxyPort: number;
   /** TLD suffix used for hostnames (default: "localhost"). */

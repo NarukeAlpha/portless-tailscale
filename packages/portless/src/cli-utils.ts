@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
+import { resolveScript } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -910,6 +911,8 @@ const PACKAGE_RUNNERS: Record<string, string[]> = {
   pnpm: ["dlx", "exec"],
 };
 
+const PACKAGE_SCRIPT_RUNNERS = new Set(["bun", "npm", "pnpm", "yarn"]);
+
 /**
  * Find the basename of the framework command inside `commandArgs`, looking
  * past known package runners (npx, bunx, yarn dlx, …) and their flags.
@@ -945,6 +948,67 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
   return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
 }
 
+function findPackageScriptFramework(
+  commandArgs: string[],
+  cwd: string | undefined
+): { basename: string; scriptArgs: string[] } | null {
+  if (!cwd || commandArgs.length < 3) return null;
+
+  const runner = path.basename(commandArgs[0]);
+  if (!PACKAGE_SCRIPT_RUNNERS.has(runner)) return null;
+
+  let i = 1;
+  while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
+  if (commandArgs[i] !== "run") return null;
+  i++;
+
+  while (i < commandArgs.length && commandArgs[i].startsWith("-") && commandArgs[i] !== "--") {
+    i++;
+  }
+
+  const scriptName = commandArgs[i];
+  if (!scriptName || scriptName === "--") return null;
+
+  const scriptArgs = resolveScript(scriptName, cwd);
+  if (!scriptArgs) return null;
+
+  const basename = findFrameworkBasename(scriptArgs);
+  return basename ? { basename, scriptArgs } : null;
+}
+
+function appendFrameworkFlags(
+  commandArgs: string[],
+  port: number,
+  basename: string,
+  existingArgs: string[],
+  useScriptSeparator: boolean
+): void {
+  const framework = FRAMEWORKS_NEEDING_PORT[basename];
+  const flags: string[] = [];
+
+  if (!existingArgs.includes("--port")) {
+    flags.push("--port", port.toString());
+    if (framework.strictPort) {
+      flags.push("--strictPort");
+    }
+  }
+
+  if (!existingArgs.includes("--host")) {
+    const isExpoLan = basename === "expo" && isLanEnvEnabled();
+    if (!isExpoLan) {
+      const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
+      flags.push("--host", hostValue);
+    }
+  }
+
+  if (flags.length === 0) return;
+
+  if (useScriptSeparator && !commandArgs.includes("--")) {
+    commandArgs.push("--");
+  }
+  commandArgs.push(...flags);
+}
+
 /**
  * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
  * mutate the array in-place to append the correct CLI flags so the app
@@ -962,27 +1026,27 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * HMR WebSocket to degrade. Outside LAN mode, `--host localhost` keeps the
  * server local.
  */
-export function injectFrameworkFlags(commandArgs: string[], port: number): void {
+export function injectFrameworkFlags(
+  commandArgs: string[],
+  port: number,
+  options: { cwd?: string } = {}
+): void {
   const basename = findFrameworkBasename(commandArgs);
-  if (!basename) return;
-
-  const framework = FRAMEWORKS_NEEDING_PORT[basename];
-
-  if (!commandArgs.includes("--port")) {
-    commandArgs.push("--port", port.toString());
-    if (framework.strictPort) {
-      commandArgs.push("--strictPort");
-    }
+  if (basename) {
+    appendFrameworkFlags(commandArgs, port, basename, commandArgs, false);
+    return;
   }
 
-  if (!commandArgs.includes("--host")) {
-    // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
-    // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
-    const isExpoLan = basename === "expo" && isLanEnvEnabled();
-    if (isExpoLan) return;
-    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
-    commandArgs.push("--host", hostValue);
-  }
+  const scriptFramework = findPackageScriptFramework(commandArgs, options.cwd);
+  if (!scriptFramework) return;
+
+  appendFrameworkFlags(
+    commandArgs,
+    port,
+    scriptFramework.basename,
+    [...scriptFramework.scriptArgs, ...commandArgs],
+    true
+  );
 }
 
 /**
