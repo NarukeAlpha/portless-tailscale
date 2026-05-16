@@ -162,7 +162,3 @@ The auth library is constructing the callback URL from `localhost` instead of th
 - **NextAuth**: `NEXTAUTH_URL=https://myapp.dev`
 - **Auth.js v5**: `AUTH_URL=https://myapp.dev`
 - **Manual**: `PORTLESS_URL` is injected automatically; use it as the base URL
-
-## Example
-
-See [`examples/google-oauth`](../../examples/google-oauth) for a complete working example with Next.js + NextAuth + Google OAuth using `--tld dev`.

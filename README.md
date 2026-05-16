@@ -60,7 +60,7 @@ bun link --global
 ```bash
 pless myapp next dev
 pless api bun dev
-pless run --name docs next dev
+pless run --name web next dev
 ```
 
 Useful URLs:

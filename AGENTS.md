@@ -20,7 +20,7 @@ Never use `--` as a dash in prose, comments, or user-facing output. Use an em da
 
 ## Boolean Environment Variables
 
-Document boolean env vars using only `0` and `1` in CLI help, SKILL.md, docs pages, and README. Code accepts `true`/`false` as well (and `skip` for `PORTLESS`), but these alternatives are not documented.
+Document boolean env vars using only `0` and `1` in CLI help, SKILL.md, and README. Code accepts `true`/`false` as well (and `skip` for `PORTLESS`), but these alternatives are not documented.
 
 ## Docs Updates
 
@@ -40,8 +40,7 @@ To prepare a release:
 2. Bump the version in `packages/portless/package.json`
 3. Write the changelog entry in `CHANGELOG.md`, wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers
 4. Remove the `<!-- release:start -->` and `<!-- release:end -->` markers from the previous release entry (only the latest release should have markers)
-5. Add a matching entry to `apps/docs/src/app/changelog/page.mdx`
-6. Open a PR and merge to `main`
+5. Open a PR and merge to `main`
 
 CI compares the version in `packages/portless/package.json` to what's on npm. If it differs, it builds, publishes, and creates the GitHub release automatically. The release body is extracted from the content between the markers.
 
